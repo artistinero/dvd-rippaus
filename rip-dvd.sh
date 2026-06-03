@@ -452,7 +452,7 @@ print('\n'.join(p for _, p in files))
             --quality 21 \
             --comb-detect \
             --decomb \
-            --anamorphic-mode loose \
+            --loose-anamorphic \
             --crop-mode auto \
             --all-audio \
             --aencoder copy \
@@ -461,6 +461,7 @@ print('\n'.join(p for _, p in files))
             --markers \
             || die "HandBrakeCLI epäonnistui: $fname"
 
+        [[ -s "$encoded_file" ]] || die "HandBrakeCLI ei tuottanut tiedostoa: $dest_name"
         local encoded_size
         encoded_size=$(du -sh "$encoded_file" | cut -f1)
         log "Koko: $raw_size → $encoded_size  (kesto: $(elapsed $(( $(date +%s) - t_title_start ))))"
