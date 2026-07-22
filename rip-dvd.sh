@@ -17,6 +17,9 @@ fi
 LOGFILE="/mnt/lacie2/vids/dvd-rip/rip.log"
 OUTBASE="/home/keitsi/dvd-rip-tmp"
 
+TEMP_WARN=85
+TEMP_CRIT=95
+
 # Globaalit metatiedot (asetetaan collect_metadata:ssa)
 CONTENT_TYPE=""
 DEST_BASE=""
@@ -311,6 +314,35 @@ dest_filename() {
     esac
 }
 
+# ── Lämpötilamonitori ────────────────────────────────────────────────────────
+
+temp_monitor() {
+    command -v sensors &>/dev/null || return
+    local interval=60 last_report=0
+    while true; do
+        sleep "$interval"
+        local max_temp
+        max_temp=$(sensors 2>/dev/null | python3 -c "
+import sys, re
+temps = [float(m.group(1)) for line in sys.stdin
+         for m in [re.search(r'\+(\d+\.?\d*)°C', line)] if m and 1 < float(m.group(1)) < 200]
+print(int(max(temps)) if temps else -1)
+")
+        (( max_temp > 0 )) || continue
+        local now
+        now=$(date +%s)
+        if (( max_temp >= TEMP_CRIT )); then
+            log "*** KRIITTINEN LÄMPÖTILA: ${max_temp}°C — harkitse pysäyttämistä! ***"
+        elif (( max_temp >= TEMP_WARN )); then
+            log "Varoitus: korkea lämpötila ${max_temp}°C (kriittinen raja ${TEMP_CRIT}°C)"
+        fi
+        if (( now - last_report >= 300 )); then
+            log "  Lämpötila: ${max_temp}°C"
+            last_report=$now
+        fi
+    done
+}
+
 # ── Pääohjelma ────────────────────────────────────────────────────────────────
 
 main() {
@@ -355,6 +387,9 @@ main() {
     mkdir -p "$outdir" "$encodedir"
     local t_total_start
     t_total_start=$(date +%s)
+
+    temp_monitor &
+    local temp_pid=$!
 
     # ── Vaihe 1: MakeMKV ──────────────────────────────────────────────────────
     banner "Vaihe 1/3 — MakeMKV: häviötön raakakopiointi"
@@ -475,6 +510,7 @@ print('\n'.join(p for _, p in files))
     done
     local t_hb_elapsed=$(( $(date +%s) - t_hb_start ))
     log "HandBrakeCLI valmis — kesto: $(elapsed $t_hb_elapsed)"
+    kill "$temp_pid" 2>/dev/null; wait "$temp_pid" 2>/dev/null || true
 
     # ── Vaihe 3: Siirrä kohteeseen ────────────────────────────────────────────
     banner "Vaihe 3/3 — Siirto kohteeseen"
