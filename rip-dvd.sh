@@ -14,8 +14,9 @@ if [[ -z "${TMUX:-}" ]]; then
     fi
 fi
 
-LOGFILE="/mnt/lacie2/vids/dvd-rip/rip.log"
+LOGFILE="/home/keitsi/rip-dvd.log"
 OUTBASE="/home/keitsi/dvd-rip-tmp"
+DEST_ROOT="/mnt/terastation/dlna/vids"
 
 TEMP_WARN=85
 TEMP_CRIT=95
@@ -273,7 +274,7 @@ collect_metadata() {
             [[ -n "$SERIES_NAME" ]] || die "Sarjan nimi ei voi olla tyhjä."
             SEASON_NUM=$(ask "Kausi" "1")
             SEASON_NUM=$(( 10#$SEASON_NUM ))
-            DEST_BASE="/mnt/lacie2/vids/series/${SERIES_NAME}/$(printf 'Season %02d' "$SEASON_NUM")"
+            DEST_BASE="${DEST_ROOT}/series/${SERIES_NAME}/$(printf 'Season %02d' "$SEASON_NUM")"
             local season_fmt next_ep=1
             season_fmt=$(printf '%02d' "$SEASON_NUM")
             if [[ -d "$DEST_BASE" ]]; then
@@ -297,26 +298,26 @@ print(max(eps) if eps else 0)
             MOVIE_NAME=$(ask "Elokuvan nimi (esim. The Godfather)")
             [[ -n "$MOVIE_NAME" ]] || die "Elokuvan nimi ei voi olla tyhjä."
             MOVIE_YEAR=$(ask "Julkaisuvuosi")
-            DEST_BASE="/mnt/lacie2/vids/movies/${MOVIE_NAME} (${MOVIE_YEAR})"
+            DEST_BASE="${DEST_ROOT}/movies/${MOVIE_NAME} (${MOVIE_YEAR})"
             ;;
         3)
             CONTENT_TYPE="music"
             ITEM_NAME=$(ask "Artisti / albumin nimi")
             [[ -n "$ITEM_NAME" ]] || die "Nimi ei voi olla tyhjä."
-            DEST_BASE="/mnt/lacie2/vids/music/${ITEM_NAME}"
+            DEST_BASE="${DEST_ROOT}/Music videos/${ITEM_NAME}"
             ;;
         4)
             CONTENT_TYPE="documentary"
             ITEM_NAME=$(ask "Dokumentin nimi")
             [[ -n "$ITEM_NAME" ]] || die "Nimi ei voi olla tyhjä."
             MOVIE_YEAR=$(ask "Julkaisuvuosi")
-            DEST_BASE="/mnt/lacie2/vids/documentary/${ITEM_NAME} (${MOVIE_YEAR})"
+            DEST_BASE="${DEST_ROOT}/documentaries/${ITEM_NAME} (${MOVIE_YEAR})"
             ;;
         5)
             CONTENT_TYPE="misc"
             ITEM_NAME=$(ask "Nimi")
             [[ -n "$ITEM_NAME" ]] || die "Nimi ei voi olla tyhjä."
-            DEST_BASE="/mnt/lacie2/vids/misc/${ITEM_NAME}"
+            DEST_BASE="${DEST_ROOT}/misc/${ITEM_NAME}"
             ;;
         *)
             die "Virheellinen valinta: '$choice'"
@@ -396,8 +397,8 @@ print(int(max(temps)) if temps else -1)
 # ── Pääohjelma ────────────────────────────────────────────────────────────────
 
 main() {
-    mountpoint -q /mnt/lacie2 \
-        || die "/mnt/lacie2 ei ole mountattu — käynnistä levy ensin."
+    mountpoint -q /mnt/terastation/dlna \
+        || die "/mnt/terastation/dlna ei ole mountattu — tarkista verkkoasema."
     [[ -n "$(list_drives)" ]] \
         || die "DVD-asemaa ei löydy (/dev/sr* puuttuu) — tarkista laitteisto."
     mkdir -p "$(dirname "$LOGFILE")" "$OUTBASE"
