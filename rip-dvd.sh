@@ -20,6 +20,7 @@ DEST_ROOT="/mnt/terastation/dlna/vids"
 
 TEMP_WARN=85
 TEMP_CRIT=95
+TEMP_RESUME=65
 
 # Globaalit metatiedot (asetetaan collect_metadata:ssa)
 CONTENT_TYPE=""
@@ -361,7 +362,7 @@ dest_filename() {
 
 temp_monitor() {
     command -v sensors &>/dev/null || return
-    local interval=60 last_report=0
+    local interval=20 last_report=0 throttled=0
     while true; do
         sleep "$interval"
         local max_temp
@@ -380,12 +381,28 @@ walk(data)
 print(int(max(temps)) if temps else -1)
 ")
         (( max_temp > 0 )) || continue
+
+        # Throttle HandBrakeCLI lämpötilan mukaan
+        local hb_pid
+        hb_pid=$(pgrep -x HandBrakeCLI || true)
+        if [[ -n "$hb_pid" ]]; then
+            if (( max_temp >= TEMP_WARN )) && (( throttled == 0 )); then
+                kill -STOP "$hb_pid" 2>/dev/null
+                throttled=1
+                log "  Lämpötila ${max_temp}°C — HandBrake pysäytetty (jatkuu kun ≤${TEMP_RESUME}°C)"
+            elif (( max_temp <= TEMP_RESUME )) && (( throttled == 1 )); then
+                kill -CONT "$hb_pid" 2>/dev/null
+                throttled=0
+                log "  Lämpötila ${max_temp}°C — HandBrake jatkuu"
+            fi
+        else
+            throttled=0
+        fi
+
         local now
         now=$(date +%s)
         if (( max_temp >= TEMP_CRIT )); then
-            log "*** KRIITTINEN LÄMPÖTILA: ${max_temp}°C — harkitse pysäyttämistä! ***"
-        elif (( max_temp >= TEMP_WARN )); then
-            log "Varoitus: korkea lämpötila ${max_temp}°C (kriittinen raja ${TEMP_CRIT}°C)"
+            log "*** KRIITTINEN LÄMPÖTILA: ${max_temp}°C ***"
         fi
         if (( now - last_report >= 300 )); then
             log "  Lämpötila: ${max_temp}°C"
