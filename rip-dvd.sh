@@ -322,10 +322,18 @@ temp_monitor() {
     while true; do
         sleep "$interval"
         local max_temp
-        max_temp=$(sensors 2>/dev/null | python3 -c "
-import sys, re
-temps = [float(m.group(1)) for line in sys.stdin
-         for m in [re.search(r'\+(\d+\.?\d*)°C', line)] if m and 1 < float(m.group(1)) < 200]
+        max_temp=$(sensors -j 2>/dev/null | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+temps = []
+def walk(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k.startswith('temp') and k.endswith('_input') and isinstance(v, float):
+                temps.append(v)
+            else:
+                walk(v)
+walk(data)
 print(int(max(temps)) if temps else -1)
 ")
         (( max_temp > 0 )) || continue
