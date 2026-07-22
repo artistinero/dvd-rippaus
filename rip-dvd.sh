@@ -50,6 +50,48 @@ run_logged() {
     return "${PIPESTATUS[0]}"
 }
 
+run_hb_logged() {
+    # Kuten run_logged, mutta suodattaa HandBraken \r-progress-räpellyn lokista.
+    # Terminaaliin menee kaikki; lokiin menee tavallinen output + joka 5. %.
+    "$@" 2>&1 | python3 -c '
+import sys, re
+last_pct = -5
+buf = b""
+stdin_b = sys.stdin.buffer
+with open(sys.argv[1], "a") as lf:
+    while True:
+        ch = stdin_b.read(1)
+        if not ch:
+            if buf:
+                line = buf.decode("utf-8", errors="replace")
+                sys.stdout.write(line + "\n")
+                lf.write(line + "\n")
+            break
+        if ch == b"\r":
+            line = buf.decode("utf-8", errors="replace")
+            sys.stdout.write(line + "\r")
+            sys.stdout.flush()
+            m = re.search(r"(\d+\.\d+) %", line)
+            if m:
+                pct = float(m.group(1))
+                if pct - last_pct >= 5:
+                    last_pct = pct
+                    lf.write("  " + line.strip() + "\n")
+                    lf.flush()
+            buf = b""
+        elif ch == b"\n":
+            line = buf.decode("utf-8", errors="replace")
+            sys.stdout.write(line + "\n")
+            sys.stdout.flush()
+            lf.write(line + "\n")
+            lf.flush()
+            buf = b""
+        else:
+            buf += ch
+' "$LOGFILE"
+    return "${PIPESTATUS[0]}"
+}
+
 die() {
     log "VIRHE: $*"
     exit 1
@@ -492,7 +534,7 @@ print('\n'.join(p for _, p in files))
 
         log "Title $(( i+1 ))/${total}: $fname ($raw_size) → $dest_name"
 
-        run_logged HandBrakeCLI \
+        run_hb_logged HandBrakeCLI \
             --input  "$raw_file" \
             --output "$encoded_file" \
             --encoder x265 \
