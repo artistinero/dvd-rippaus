@@ -314,7 +314,11 @@ dest_filename() {
 # ── Pääohjelma ────────────────────────────────────────────────────────────────
 
 main() {
-    mkdir -p "$OUTBASE"
+    mountpoint -q /mnt/lacie2 \
+        || die "/mnt/lacie2 ei ole mountattu — käynnistä levy ensin."
+    [[ -n "$(list_drives)" ]] \
+        || die "DVD-asemaa ei löydy (/dev/sr* puuttuu) — tarkista laitteisto."
+    mkdir -p "$(dirname "$LOGFILE")" "$OUTBASE"
     : >> "$LOGFILE"
 
     banner "DVD-rippaus aloitettu — $(date '+%Y-%m-%d %H:%M:%S')"
