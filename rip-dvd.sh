@@ -173,6 +173,7 @@ ask_meta() {
         local np="Sarja"
         [[ -n "$p_name" && "$p_type" == series ]] && np+=" [$p_name]"
         read -rp "${np}: " name; name="${name:-$p_name}"
+        [[ -z "$name" ]] && { echo "  Nimi ei voi olla tyhjä."; return 1; }
 
         local sp="Kausi"
         [[ -n "$p_season" && "$p_type" == series ]] && sp+=" [$p_season]"
@@ -202,6 +203,7 @@ print(max(n)+1 if n else 1)" 2>/dev/null || echo 1)
         local lbl; [[ "$type" == movie ]] && lbl="Elokuvan nimi" || lbl="Dokumentin nimi"
         [[ -n "$p_name" && "$p_type" == "$type" ]] && lbl+=" [$p_name]"
         read -rp "${lbl}: " name; name="${name:-$p_name}"
+        [[ -z "$name" ]] && { echo "  Nimi ei voi olla tyhjä."; return 1; }
         read -rp "Vuosi: " val
         ep=""
         ;;
@@ -210,16 +212,19 @@ print(max(n)+1 if n else 1)" 2>/dev/null || echo 1)
         local np="Nimi (artisti / keikka / kokoelma)"
         [[ -n "$p_name" && "$p_type" == music ]] && np+=" [$p_name]"
         read -rp "${np}: " name; name="${name:-$p_name}"
+        [[ -z "$name" ]] && { echo "  Nimi ei voi olla tyhjä."; return 1; }
         val="" ep=""
         ;;
 
     misc)
         read -rp "Nimi: " name
+        [[ -z "$name" ]] && { echo "  Nimi ei voi olla tyhjä."; return 1; }
         val="" ep=""
         ;;
     esac
 
-    printf '%s|%s|%s|%s' "$type" "$name" "$val" "$ep"
+    # Käytä \x1F (ASCII unit separator) erottimena — ei esiinny nimissä
+    printf '%s\x1f%s\x1f%s\x1f%s' "$type" "$name" "$val" "$ep"
 }
 
 # ── Enkoodausvaihe ────────────────────────────────────────────────────────────
@@ -297,6 +302,8 @@ encode_session() {
 
     done < <(find "$session_dir" -name "meta.conf" | sort)
 
+    local hb; hb=$(pgrep -x HandBrakeCLI 2>/dev/null || true)
+    [[ -n "$hb" ]] && kill -CONT "$hb" 2>/dev/null || true
     kill "$tpid" 2>/dev/null || true
     trap - INT TERM
     log "═══ Enkoodaus valmis ═══"
@@ -337,7 +344,7 @@ main() {
 
         local meta_str
         meta_str=$(ask_meta "$p_type" "$p_name" "$p_season" "$p_ep")
-        IFS='|' read -r p_type p_name p_season p_ep <<< "$meta_str"
+        IFS=$'\x1f' read -r p_type p_name p_season p_ep <<< "$meta_str"
 
         echo ""
         case "$p_type" in
@@ -347,6 +354,8 @@ main() {
         music)  printf '  → Musiikki: %s\n'          "$p_name" ;;
         misc)   printf '  → Misc: %s\n'              "$p_name" ;;
         esac
+
+        [[ -z "$p_name" ]] && continue  # ask_meta palautti virhe
 
         log "Levy $((disc_num+1)): $p_type | $p_name | $p_season | ep=$p_ep"
         echo "  Odotetaan levyasemaa..."
@@ -367,6 +376,8 @@ main() {
         local mkv_log="${raw_dir}/makemkv.log"
         makemkvcon mkv "disc:${disc_idx}" all "${raw_dir}/" 2>&1 \
             | tee -a "$LOGFILE" | tee "$mkv_log"
+        local mkv_rc=${PIPESTATUS[0]}
+        (( mkv_rc != 0 )) && log "VAROITUS: MakeMKV päättyi virheeseen (rc=${mkv_rc}) — tarkista loki"
 
         eject 2>/dev/null || true
 
