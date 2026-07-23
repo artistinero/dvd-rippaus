@@ -153,7 +153,7 @@ dest_path() {
 
 ask_meta() {
     local p_type="${1:-}" p_name="${2:-}" p_season="${3:-}" p_ep="${4:-}"
-    echo ""
+    echo "" >&2
 
     local prompt="Tyyppi (series/movie/doc/music/misc)"
     [[ -n "$p_type" ]] && prompt+=" [$p_type]"
@@ -162,7 +162,7 @@ ask_meta() {
         read -rp "${prompt}: " type
         type="${type:-$p_type}"
         case "$type" in series|movie|doc|music|misc) break ;;
-        *) echo "  → series, movie, doc, music tai misc" ;;
+        *) echo "  → series, movie, doc, music tai misc" >&2 ;;
         esac
     done
 
@@ -173,7 +173,7 @@ ask_meta() {
         local np="Sarja"
         [[ -n "$p_name" && "$p_type" == series ]] && np+=" [$p_name]"
         read -rp "${np}: " name; name="${name:-$p_name}"
-        [[ -z "$name" ]] && { echo "  Nimi ei voi olla tyhjä."; return 1; }
+        [[ -z "$name" ]] && { echo "  Nimi ei voi olla tyhjä." >&2; return 1; }
 
         local sp="Kausi"
         [[ -n "$p_season" && "$p_type" == series ]] && sp+=" [$p_season]"
@@ -203,7 +203,7 @@ print(max(n)+1 if n else 1)" 2>/dev/null || echo 1)
         local lbl; [[ "$type" == movie ]] && lbl="Elokuvan nimi" || lbl="Dokumentin nimi"
         [[ -n "$p_name" && "$p_type" == "$type" ]] && lbl+=" [$p_name]"
         read -rp "${lbl}: " name; name="${name:-$p_name}"
-        [[ -z "$name" ]] && { echo "  Nimi ei voi olla tyhjä."; return 1; }
+        [[ -z "$name" ]] && { echo "  Nimi ei voi olla tyhjä." >&2; return 1; }
         read -rp "Vuosi: " val
         ep=""
         ;;
@@ -212,13 +212,13 @@ print(max(n)+1 if n else 1)" 2>/dev/null || echo 1)
         local np="Nimi (artisti / keikka / kokoelma)"
         [[ -n "$p_name" && "$p_type" == music ]] && np+=" [$p_name]"
         read -rp "${np}: " name; name="${name:-$p_name}"
-        [[ -z "$name" ]] && { echo "  Nimi ei voi olla tyhjä."; return 1; }
+        [[ -z "$name" ]] && { echo "  Nimi ei voi olla tyhjä." >&2; return 1; }
         val="" ep=""
         ;;
 
     misc)
         read -rp "Nimi: " name
-        [[ -z "$name" ]] && { echo "  Nimi ei voi olla tyhjä."; return 1; }
+        [[ -z "$name" ]] && { echo "  Nimi ei voi olla tyhjä." >&2; return 1; }
         val="" ep=""
         ;;
     esac
