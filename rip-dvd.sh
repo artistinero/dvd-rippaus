@@ -1,61 +1,75 @@
 #!/bin/bash
-# rip-dvd.sh — MakeMKV + HandBrakeCLI työnkulku
+# rip-dvd.sh — Interaktiivinen DVD-rippaus ja enkoodaus
 set -uo pipefail
 export TZ="Europe/Helsinki"
 
-# Ajetaan automaattisesti tmux-sessiossa — SSH-katkos ei tapa prosessia
+# Käynnistä automaattisesti tmux-sessiossa
 _SESSION="dvd-rip"
 if [[ -z "${TMUX:-}" ]]; then
     if tmux has-session -t "$_SESSION" 2>/dev/null; then
-        echo "  Sessio '$_SESSION' on jo käynnissä — liitytään."
+        echo "Sessio '$_SESSION' on jo käynnissä — liitytään."
         exec tmux attach -t "$_SESSION"
     else
         exec tmux new-session -s "$_SESSION" "$0" "$@"
     fi
 fi
 
-LOGFILE="/home/keitsi/rip-dvd.log"
 OUTBASE="/home/keitsi/dvd-rip-tmp"
 DEST_ROOT="/mnt/terastation/dlna/vids"
-
+LOGFILE="/home/keitsi/rip-dvd.log"
 TEMP_WARN=85
-TEMP_CRIT=95
 TEMP_RESUME=65
-
-# Globaalit metatiedot (asetetaan collect_metadata:ssa)
-CONTENT_TYPE=""
-DEST_BASE=""
-SERIES_NAME=""
-SEASON_NUM=1
-FIRST_EP=1
-MOVIE_NAME=""
-MOVIE_YEAR=""
-ITEM_NAME=""
+MIN_DURATION=60  # sekuntia — lyhyemmät titleset ohitetaan
 
 # ── Apufunktiot ───────────────────────────────────────────────────────────────
 
-log() {
-    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
-    echo "$msg"
-    echo "$msg" >> "$LOGFILE"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOGFILE"; }
+die() { log "VIRHE: $*"; exit 1; }
+
+get_temp() {
+    command -v sensors &>/dev/null || { echo 0; return; }
+    sensors -j 2>/dev/null | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+t = []
+def w(o):
+    if isinstance(o, dict):
+        for k, v in o.items():
+            if k.startswith('temp') and k.endswith('_input') and isinstance(v, float):
+                t.append(v)
+            else:
+                w(v)
+w(data); print(int(max(t)) if t else 0)"
 }
 
-banner() {
-    log ""
-    log "══════════════════════════════════════════════════════"
-    log "  $*"
-    log "══════════════════════════════════════════════════════"
+throttle_loop() {
+    local paused=0
+    while true; do
+        sleep 20
+        local hb_pid temp
+        hb_pid=$(pgrep -x HandBrakeCLI 2>/dev/null || true)
+        temp=$(get_temp)
+        [[ -z "$hb_pid" ]] && { paused=0; continue; }
+        if (( temp >= TEMP_WARN )) && (( paused == 0 )); then
+            kill -STOP "$hb_pid" 2>/dev/null; paused=1
+            log "  Throttle: paussi ${temp}°C"
+        elif (( temp <= TEMP_RESUME )) && (( paused == 1 )); then
+            kill -CONT "$hb_pid" 2>/dev/null; paused=0
+            log "  Throttle: jatkuu ${temp}°C"
+        fi
+    done
 }
 
-run_logged() {
-    "$@" 2>&1 | tee -a "$LOGFILE"
-    return "${PIPESTATUS[0]}"
-}
-
-run_hb_logged() {
-    # Kuten run_logged, mutta suodattaa HandBraken \r-progress-räpellyn lokista.
-    # Terminaaliin menee kaikki; lokiin menee tavallinen output + joka 5. %.
-    "$@" 2>&1 | python3 -c '
+run_hb() {
+    # $1=input $2=output — suodattaa HandBraken \r-progress-spämin lokista
+    HandBrakeCLI \
+        --input "$1" --output "$2" \
+        --encoder x265 --quality 21 \
+        --comb-detect --decomb \
+        --loose-anamorphic --crop-mode auto \
+        --all-audio --aencoder copy --audio-fallback aac \
+        --all-subtitles --markers \
+        2>&1 | python3 -c '
 import sys, re
 last_pct = -5
 buf = b""
@@ -66,27 +80,22 @@ with open(sys.argv[1], "a") as lf:
         if not ch:
             if buf:
                 line = buf.decode("utf-8", errors="replace")
-                sys.stdout.write(line + "\n")
-                lf.write(line + "\n")
+                sys.stdout.write(line + "\n"); lf.write(line + "\n")
             break
         if ch == b"\r":
             line = buf.decode("utf-8", errors="replace")
-            sys.stdout.write(line + "\r")
-            sys.stdout.flush()
+            sys.stdout.write(line + "\r"); sys.stdout.flush()
             m = re.search(r"(\d+\.\d+) %", line)
             if m:
                 pct = float(m.group(1))
                 if pct - last_pct >= 5:
                     last_pct = pct
-                    lf.write("  " + line.strip() + "\n")
-                    lf.flush()
+                    lf.write("  " + line.strip() + "\n"); lf.flush()
             buf = b""
         elif ch == b"\n":
             line = buf.decode("utf-8", errors="replace")
-            sys.stdout.write(line + "\n")
-            sys.stdout.flush()
-            lf.write(line + "\n")
-            lf.flush()
+            sys.stdout.write(line + "\n"); sys.stdout.flush()
+            lf.write(line + "\n"); lf.flush()
             buf = b""
         else:
             buf += ch
@@ -94,532 +103,296 @@ with open(sys.argv[1], "a") as lf:
     return "${PIPESTATUS[0]}"
 }
 
-die() {
-    log "VIRHE: $*"
-    exit 1
-}
-
-elapsed() {
-    # elapsed <sekunteja> → "1h 23m 45s"
-    local s="$1"
-    local h=$(( s / 3600 ))
-    local m=$(( (s % 3600) / 60 ))
-    local sec=$(( s % 60 ))
-    (( h > 0 )) && printf '%dh %02dm %02ds' "$h" "$m" "$sec" || printf '%dm %02ds' "$m" "$sec"
-}
-
-ask() {
-    # ask "Kysymys" [oletusarvo]
-    local prompt="$1"
-    local default="${2:-}"
-    local answer
-    if [[ -n "$default" ]]; then
-        echo -n "  $prompt [$default]: " >/dev/tty
-    else
-        echo -n "  $prompt: " >/dev/tty
-    fi
-    read -r answer </dev/tty
-    if [[ -z "$answer" && -n "$default" ]]; then
-        echo "$default"
-    else
-        echo "$answer"
-    fi
-}
-
-# Palauttaa titlen keston sekunteina mediainfolla
-title_duration_sec() {
-    local file="$1"
-    mediainfo --Inform="Video;%Duration%" "$file" 2>/dev/null \
-        | python3 -c "
-import sys
-v = sys.stdin.read().strip()
-print(int(float(v) / 1000) if v else 0)
-" 2>/dev/null || echo 0
-}
-
-# ── Asema-apufunktiot ─────────────────────────────────────────────────────────
-
-list_drives() {
-    ls /dev/sr* 2>/dev/null
-}
-
-# CDROM_DRIVE_STATUS: 1=NO_DISC  2=TRAY_OPEN  3=NOT_READY  4=DISC_OK
-drive_status() {
-    python3 -c "
-import fcntl, os, sys
-try:
-    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK)
-    r = fcntl.ioctl(fd, 0x5326, 0)
-    os.close(fd)
-    print(r)
-except:
-    print(0)
-" "$1" 2>/dev/null
-}
-
-find_disc() {
-    # Kutsutaan vasta kun ioctl on vahvistanut levyn olevan sisällä
-    timeout 120 makemkvcon -r info disc:9999 2>/dev/null | python3 -c "
+wait_for_disc() {
+    local info=""
+    while [[ -z "$info" ]]; do
+        info=$(makemkvcon -r info disc:9999 2>/dev/null | python3 -c "
 import sys, re
 for line in sys.stdin:
     m = re.match(r'^DRV:(\d+),\d+,\d+,\d+,\"[^\"]*\",\"([^\"]+)\",\"([^\"]+)\"', line.strip())
     if m:
-        print(m.group(1), m.group(2), m.group(3))
+        print(m.group(1))
         break
-"
-}
-
-# ── Levyn latausdialoogi ──────────────────────────────────────────────────────
-
-load_disc() {
-    # Etsitään asema jossa levy on sisällä; jos ei löydy, käytetään ensimmäistä
-    local first_dev="/dev/sr0"
-    local dev
-    while IFS= read -r dev; do
-        local s
-        s=$(drive_status "$dev")
-        if [[ "$s" == "4" ]]; then
-            first_dev="$dev"
-            break
-        fi
-        first_dev="$dev"   # fallback viimeiseen löydettyyn
-    done < <(list_drives)
-
-    local status
-    status=$(drive_status "$first_dev")
-
-    case "$status" in
-        4)  # DISC_OK — levy valmiina
-            ;;
-        2)  # TRAY_OPEN
-            echo "" >/dev/tty
-            echo "  Kelkka on auki. Laita levy sisään." >/dev/tty
-            echo -n "  Paina Enter niin suljetaan kelkka..." >/dev/tty
-            read -r </dev/tty
-            eject -t "$first_dev" 2>/dev/null && echo "  Kelkka suljettu." >/dev/tty || true
-            ;;
-        *)  # NO_DISC tai NOT_READY
-            echo "" >/dev/tty
-            echo "  Ei levyä asemassa ($first_dev)." >/dev/tty
-            echo -n "  Avataan kelkka? [K/e]: " >/dev/tty
-            read -r answer </dev/tty
-            if [[ ! "$answer" =~ ^[Ee]$ ]]; then
-                eject "$first_dev" 2>/dev/null \
-                    && echo "  Kelkka avattu. Laita levy sisään." >/dev/tty \
-                    || echo "  Varoitus: kelkkaa ei saatu auki." >/dev/tty
-            else
-                echo "Peruutettu." >/dev/tty
-                exit 0
-            fi
-            echo -n "  Paina Enter niin suljetaan kelkka..." >/dev/tty
-            read -r </dev/tty
-            eject -t "$first_dev" 2>/dev/null && echo "  Kelkka suljettu." >/dev/tty || true
-            ;;
-    esac
-
-    # Odotetaan DISC_OK:ta ennen makemkvcon-kutsua
-    echo "" >/dev/tty
-    echo -n "  Odotetaan aseman valmistumista" >/dev/tty
-    local attempts=0
-    while (( attempts < 30 )); do
-        status=$(drive_status "$first_dev")
-        if [[ "$status" == "4" ]]; then
-            echo " OK" >/dev/tty
-            break
-        fi
-        echo -n "." >/dev/tty
-        sleep 2
-        (( attempts++ )) || true
+" 2>/dev/null || true)
+        [[ -z "$info" ]] && sleep 10
     done
-    (( attempts < 30 )) || die "Asema ei vastannut. Tarkista levy ja yritä uudelleen."
-
-    echo "  Tunnistetaan levy (voi kestää minuutin)..." >/dev/tty
-    local disc_info
-    disc_info=$(find_disc) || true
-
-    if [[ -z "$disc_info" ]]; then
-        die "MakeMKV ei tunnistanut levyä. Tarkista levy ja yritä uudelleen."
-    fi
-
-    local disc_idx disc_name device_path
-    read -r disc_idx disc_name device_path <<< "$disc_info"
-    echo "" >/dev/tty
-    echo "  Levy: $disc_name  ($device_path)" >/dev/tty
-    echo -n "  Ripataanko tämä levy? [K/e]: " >/dev/tty
-    read -r answer </dev/tty
-    [[ "$answer" =~ ^[Ee]$ ]] && { echo "Peruutettu." >/dev/tty; exit 0; }
-    echo "$disc_info"
+    echo "$info"
 }
 
-# ── Metatietojen keruu ────────────────────────────────────────────────────────
-
-collect_metadata() {
-    echo ""
-    echo "  ┌─────────────────────────────────┐"
-    echo "  │  Sisältötyyppi                  │"
-    echo "  ├─────────────────────────────────┤"
-    echo "  │  1) series       TV-sarja       │"
-    echo "  │  2) movies       Elokuva        │"
-    echo "  │  3) music        Musiikki       │"
-    echo "  │  4) documentary  Dokumentti     │"
-    echo "  │  5) misc         Muu            │"
-    echo "  └─────────────────────────────────┘"
-    echo -n "  Valinta [1-5]: "
-    read -r choice
-
-    echo ""
-    case "$choice" in
-        1)
-            CONTENT_TYPE="series"
-            SERIES_NAME=$(ask "Sarjan nimi (esim. The Wire)")
-            [[ -n "$SERIES_NAME" ]] || die "Sarjan nimi ei voi olla tyhjä."
-            SEASON_NUM=$(ask "Kausi" "1")
-            SEASON_NUM=$(( 10#$SEASON_NUM ))
-            DEST_BASE="${DEST_ROOT}/series/${SERIES_NAME}/$(printf 'Season %02d' "$SEASON_NUM")"
-            local season_fmt next_ep=1
-            season_fmt=$(printf '%02d' "$SEASON_NUM")
-            if [[ -d "$DEST_BASE" ]]; then
-                local max_ep
-                max_ep=$(find "$DEST_BASE" -maxdepth 1 -name "*.mkv" -printf '%f\n' 2>/dev/null | python3 -c "
+sorted_titles() {
+    find "$1" -maxdepth 1 -name "*_t*.mkv" -printf '%f\t%p\n' | python3 -c "
 import sys, re
-pat = re.compile(r'[Ss]${season_fmt}[Ee](\d+)')
-eps = [int(m.group(1)) for line in sys.stdin for m in [pat.search(line.strip())] if m]
-print(max(eps) if eps else 0)
-")
-                if (( max_ep > 0 )); then
-                    next_ep=$(( max_ep + 1 ))
-                    echo "  Löydettiin jakso E$(printf '%02d' "$max_ep") — ehdotetaan E$(printf '%02d' "$next_ep") aloitukseksi."
-                fi
-            fi
-            FIRST_EP=$(ask "Ensimmäinen jaksonumero tällä levyllä" "$next_ep")
-            FIRST_EP=$(( 10#$FIRST_EP ))
-            ;;
-        2)
-            CONTENT_TYPE="movies"
-            MOVIE_NAME=$(ask "Elokuvan nimi (esim. The Godfather)")
-            [[ -n "$MOVIE_NAME" ]] || die "Elokuvan nimi ei voi olla tyhjä."
-            MOVIE_YEAR=$(ask "Julkaisuvuosi")
-            DEST_BASE="${DEST_ROOT}/movies/${MOVIE_NAME} (${MOVIE_YEAR})"
-            ;;
-        3)
-            CONTENT_TYPE="music"
-            ITEM_NAME=$(ask "Artisti / albumin nimi")
-            [[ -n "$ITEM_NAME" ]] || die "Nimi ei voi olla tyhjä."
-            DEST_BASE="${DEST_ROOT}/Music videos/${ITEM_NAME}"
-            ;;
-        4)
-            CONTENT_TYPE="documentary"
-            ITEM_NAME=$(ask "Dokumentin nimi")
-            [[ -n "$ITEM_NAME" ]] || die "Nimi ei voi olla tyhjä."
-            MOVIE_YEAR=$(ask "Julkaisuvuosi")
-            DEST_BASE="${DEST_ROOT}/documentaries/${ITEM_NAME} (${MOVIE_YEAR})"
-            ;;
-        5)
-            CONTENT_TYPE="misc"
-            ITEM_NAME=$(ask "Nimi")
-            [[ -n "$ITEM_NAME" ]] || die "Nimi ei voi olla tyhjä."
-            DEST_BASE="${DEST_ROOT}/misc/${ITEM_NAME}"
-            ;;
-        *)
-            die "Virheellinen valinta: '$choice'"
-            ;;
-    esac
-
-    echo "  Kohde: $DEST_BASE"
+files = []
+for line in sys.stdin:
+    parts = line.strip().split('\t', 1)
+    if len(parts) != 2: continue
+    m = re.search(r'_t(\d+)\.mkv$', parts[0])
+    files.append((int(m.group(1)) if m else 999, parts[1]))
+files.sort()
+print('\n'.join(p for _, p in files))"
 }
 
-# Palauttaa tiedostonimen (ilman hakemistoa) annetulle titlenumerolle
-dest_filename() {
-    local title_idx="$1"   # 0-pohjainen indeksi enkoodattujen joukossa
-    local total="$2"
+title_dur() {
+    mediainfo --Inform="Video;%Duration%" "$1" 2>/dev/null | python3 -c "
+import sys; v=sys.stdin.read().strip()
+print(int(float(v)/1000) if v else 0)" 2>/dev/null || echo 0
+}
 
-    case "$CONTENT_TYPE" in
-        series)
-            local ep=$(( FIRST_EP + title_idx ))
-            printf "%s S%02dE%02d.mkv" "$SERIES_NAME" "$SEASON_NUM" "$ep"
-            ;;
-        movies|documentary)
-            local label
-            if [[ "$CONTENT_TYPE" == "movies" ]]; then
-                label="${MOVIE_NAME} (${MOVIE_YEAR})"
-            else
-                label="${ITEM_NAME} (${MOVIE_YEAR})"
-            fi
-            if (( total == 1 )); then
-                printf "%s.mkv" "$label"
-            else
-                printf "%s - Part %d.mkv" "$label" "$(( title_idx + 1 ))"
-            fi
-            ;;
-        music|misc)
-            # Käytetään MakeMKV:n nimestä johdettua titlenumerointia
-            printf "%s - t%02d.mkv" "$ITEM_NAME" "$title_idx"
-            ;;
+dest_path() {
+    local type="$1" name="$2" val="$3"
+    case "$type" in
+    series)  printf '%s/series/%s/Season %02d' "$DEST_ROOT" "$name" "$val" ;;
+    movie)   printf '%s/movies/%s (%s)'        "$DEST_ROOT" "$name" "$val" ;;
+    doc)     printf '%s/documentaries/%s (%s)' "$DEST_ROOT" "$name" "$val" ;;
+    music)   printf '%s/Music videos/%s'       "$DEST_ROOT" "$name" ;;
+    misc)    printf '%s/misc/%s'               "$DEST_ROOT" "$name" ;;
     esac
 }
 
-# ── Lämpötilamonitori ────────────────────────────────────────────────────────
+# ── Interaktiivinen kysely per levy ───────────────────────────────────────────
 
-temp_monitor() {
-    command -v sensors &>/dev/null || return
-    local interval=20 last_report=0 throttled=0
+ask_meta() {
+    local p_type="${1:-}" p_name="${2:-}" p_season="${3:-}" p_ep="${4:-}"
+    echo ""
+
+    local prompt="Tyyppi (series/movie/doc/music/misc)"
+    [[ -n "$p_type" ]] && prompt+=" [$p_type]"
+    local type=""
     while true; do
-        sleep "$interval"
-        local max_temp
-        max_temp=$(sensors -j 2>/dev/null | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-temps = []
-def walk(obj):
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if k.startswith('temp') and k.endswith('_input') and isinstance(v, float):
-                temps.append(v)
-            else:
-                walk(v)
-walk(data)
-print(int(max(temps)) if temps else -1)
-")
-        (( max_temp > 0 )) || continue
-
-        # Throttle HandBrakeCLI lämpötilan mukaan
-        local hb_pid
-        hb_pid=$(pgrep -x HandBrakeCLI || true)
-        if [[ -n "$hb_pid" ]]; then
-            if (( max_temp >= TEMP_WARN )) && (( throttled == 0 )); then
-                kill -STOP "$hb_pid" 2>/dev/null
-                throttled=1
-                log "  Lämpötila ${max_temp}°C — HandBrake pysäytetty (jatkuu kun ≤${TEMP_RESUME}°C)"
-            elif (( max_temp <= TEMP_RESUME )) && (( throttled == 1 )); then
-                kill -CONT "$hb_pid" 2>/dev/null
-                throttled=0
-                log "  Lämpötila ${max_temp}°C — HandBrake jatkuu"
-            fi
-        else
-            throttled=0
-        fi
-
-        local now
-        now=$(date +%s)
-        if (( max_temp >= TEMP_CRIT )); then
-            log "*** KRIITTINEN LÄMPÖTILA: ${max_temp}°C ***"
-        fi
-        if (( now - last_report >= 300 )); then
-            log "  Lämpötila: ${max_temp}°C"
-            last_report=$now
-        fi
+        read -rp "${prompt}: " type
+        type="${type:-$p_type}"
+        case "$type" in series|movie|doc|music|misc) break ;;
+        *) echo "  → series, movie, doc, music tai misc" ;;
+        esac
     done
+
+    local name="" val="" ep=""
+
+    case "$type" in
+    series)
+        local np="Sarja"
+        [[ -n "$p_name" && "$p_type" == series ]] && np+=" [$p_name]"
+        read -rp "${np}: " name; name="${name:-$p_name}"
+
+        local sp="Kausi"
+        [[ -n "$p_season" && "$p_type" == series ]] && sp+=" [$p_season]"
+        read -rp "${sp}: " val; val="${val:-$p_season}"
+
+        # Ehdota seuraavaa jaksoa: ensin session-laskuri, sitten terastation
+        local suggest=1
+        if [[ -n "$p_ep" && "$p_type" == series && "$p_season" == "$val" ]]; then
+            suggest="$p_ep"
+        else
+            local dd; dd=$(dest_path series "$name" "$val")
+            if [[ -d "$dd" ]]; then
+                suggest=$(find "$dd" -maxdepth 1 -name "*.mkv" 2>/dev/null | python3 -c "
+import sys, re
+n = []
+for line in sys.stdin:
+    m = re.search(r'E(\d+)', line.strip())
+    if m: n.append(int(m.group(1)))
+print(max(n)+1 if n else 1)" 2>/dev/null || echo 1)
+            fi
+        fi
+        read -rp "Ensimmäinen jakso tällä levyllä [$suggest]: " ep
+        ep="${ep:-$suggest}"
+        ;;
+
+    movie|doc)
+        local lbl; [[ "$type" == movie ]] && lbl="Elokuvan nimi" || lbl="Dokumentin nimi"
+        [[ -n "$p_name" && "$p_type" == "$type" ]] && lbl+=" [$p_name]"
+        read -rp "${lbl}: " name; name="${name:-$p_name}"
+        read -rp "Vuosi: " val
+        ep=""
+        ;;
+
+    music)
+        local np="Nimi (artisti / keikka / kokoelma)"
+        [[ -n "$p_name" && "$p_type" == music ]] && np+=" [$p_name]"
+        read -rp "${np}: " name; name="${name:-$p_name}"
+        val="" ep=""
+        ;;
+
+    misc)
+        read -rp "Nimi: " name
+        val="" ep=""
+        ;;
+    esac
+
+    printf '%s|%s|%s|%s' "$type" "$name" "$val" "$ep"
+}
+
+# ── Enkoodausvaihe ────────────────────────────────────────────────────────────
+
+encode_session() {
+    local session_dir="$1"
+    log "═══ Enkoodausvaihe alkaa ═══"
+
+    throttle_loop &
+    local tpid=$!
+    trap "kill $tpid 2>/dev/null; exit" INT TERM
+
+    while IFS= read -r mf; do
+        local raw_dir; raw_dir=$(dirname "$mf")
+        local type name season ep
+        type=$(grep   '^TYPE='     "$mf" | cut -d= -f2-)
+        name=$(grep   '^NAME='     "$mf" | cut -d= -f2-)
+        season=$(grep '^SEASON='   "$mf" | cut -d= -f2-)
+        ep=$(grep     '^START_EP=' "$mf" | cut -d= -f2-)
+
+        # Suodata titleset keston mukaan
+        local filtered=()
+        while IFS= read -r f; do
+            [[ -f "$f" ]] || continue
+            local dur; dur=$(title_dur "$f")
+            if (( dur >= MIN_DURATION )); then
+                filtered+=("$f")
+            else
+                log "  Ohitetaan: ${f##*/} (${dur}s)"; rm -f "$f"
+            fi
+        done < <(sorted_titles "$raw_dir")
+
+        if (( ${#filtered[@]} == 0 )); then
+            log "VAROITUS: Ei enkoodattavia — ${raw_dir##*/}"; continue
+        fi
+
+        local dest; dest=$(dest_path "$type" "$name" "$season")
+        mkdir -p "$dest"
+        local enc_dir="${raw_dir}/encoded"
+        mkdir -p "$enc_dir"
+
+        local total=${#filtered[@]} i=1
+        for raw in "${filtered[@]}"; do
+            local out_name
+            case "$type" in
+            series)
+                out_name="${name} S$(printf '%02d' "$season")E$(printf '%02d' "$ep").mkv"
+                ;;
+            *)
+                if (( total == 1 )); then
+                    out_name="${name}.mkv"
+                else
+                    out_name="${name} - Part $(printf '%02d' "$i").mkv"
+                fi
+                ;;
+            esac
+
+            local out="${enc_dir}/${out_name}"
+            log "Enkoodataan (${i}/${total}): ${raw##*/} → ${out_name}"
+            run_hb "$raw" "$out"
+            local rc=$?
+
+            if (( rc == 0 )) && [[ -s "$out" ]]; then
+                local sz; sz=$(du -sh "$out" | cut -f1)
+                mv "$out" "${dest}/"
+                rm -f "$raw"
+                log "  ✓ ${out_name} (${sz})"
+            else
+                log "  VIRHE: enkoodaus epäonnistui — ${raw##*/} (raakadata jää ${raw_dir}/)"
+            fi
+
+            [[ "$type" == series ]] && (( ep++ )) || true
+            (( i++ )) || true
+        done
+
+    done < <(find "$session_dir" -name "meta.conf" | sort)
+
+    kill "$tpid" 2>/dev/null || true
+    trap - INT TERM
+    log "═══ Enkoodaus valmis ═══"
 }
 
 # ── Pääohjelma ────────────────────────────────────────────────────────────────
 
 main() {
+    mkdir -p "$OUTBASE"
+    log "═══ DVD-rippaus käynnistyy ═══"
+
     mountpoint -q /mnt/terastation/dlna \
-        || die "/mnt/terastation/dlna ei ole mountattu — tarkista verkkoasema."
-    [[ -n "$(list_drives)" ]] \
-        || die "DVD-asemaa ei löydy (/dev/sr* puuttuu) — tarkista laitteisto."
-    mkdir -p "$(dirname "$LOGFILE")" "$OUTBASE"
-    : >> "$LOGFILE"
+        || die "Terastation ei ole mountattu — tarkista verkkoasema"
+    command -v makemkvcon  &>/dev/null || die "makemkvcon ei löydy"
+    command -v HandBrakeCLI &>/dev/null || die "HandBrakeCLI ei löydy"
+    command -v mediainfo   &>/dev/null || die "mediainfo ei löydy"
 
-    banner "DVD-rippaus aloitettu — $(date '+%Y-%m-%d %H:%M:%S')"
+    local free_gb
+    free_gb=$(df "$OUTBASE" | awk 'NR==2 {printf "%d", $4/1024/1024}')
+    (( free_gb < 10 )) \
+        && log "VAROITUS: Vapaata tilaa vain ${free_gb} GB — levytila voi loppua kesken"
+    log "Valmis. Vapaata tilaa: ${free_gb} GB"
 
-    # 1. Levy
-    log "Tarkistetaan levyasema..."
-    local disc_info
-    disc_info=$(load_disc) || die "Levyaseman tarkistus epäonnistui."
+    local session_dir="${OUTBASE}/session_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$session_dir"
 
-    local disc_idx disc_name device_path
-    read -r disc_idx disc_name device_path <<< "$disc_info"
-    log "Levy:  disc:${disc_idx}  /  ${disc_name}  /  ${device_path}"
+    local p_type="" p_name="" p_season="" p_ep=""
+    local disc_num=0
 
-    # 2. Metatiedot
-    collect_metadata
-    log "Tyyppi: $CONTENT_TYPE  →  $DEST_BASE"
+    while true; do
+        echo ""
+        echo "══════════════════════════════════════════════"
+        printf '  Levyjä ripattuna tässä sessiossa: %d\n' "$disc_num"
+        echo "══════════════════════════════════════════════"
+        local cmd=""
+        read -rp "  Lisää levy ja paina Enter  (q = aloita enkoodaus): " cmd
+        [[ "${cmd,,}" == "q" ]] && break
 
-    # 3. Vahvistus
-    echo ""
-    echo "  Levyn nimi:  $disc_name"
-    echo "  Tyyppi:      $CONTENT_TYPE"
-    echo "  Kohde:       $DEST_BASE"
-    echo ""
-    echo -n "  Aloitetaan rippaus? [K/e]: "
-    read -r answer
-    [[ "$answer" =~ ^[Ee]$ ]] && { echo "Peruutettu."; exit 0; }
+        local meta_str
+        meta_str=$(ask_meta "$p_type" "$p_name" "$p_season" "$p_ep")
+        IFS='|' read -r p_type p_name p_season p_ep <<< "$meta_str"
 
-    local outdir="${OUTBASE}/${disc_name}"
-    local encodedir="${outdir}/encoded"
-    # Poistetaan vanhat raakatiedostot ettei MakeMKV kysy ylikirjoituksesta
-    if [[ -d "$outdir" ]]; then
-        find "$outdir" -maxdepth 1 -name "*.mkv" -delete
-    fi
-    mkdir -p "$outdir" "$encodedir"
-    local t_total_start
-    t_total_start=$(date +%s)
+        echo ""
+        case "$p_type" in
+        series) printf '  → %s S%02d alkaen E%02d\n' "$p_name" "$p_season" "$p_ep" ;;
+        movie)  printf '  → Elokuva: %s (%s)\n'      "$p_name" "$p_season" ;;
+        doc)    printf '  → Dokumentti: %s (%s)\n'   "$p_name" "$p_season" ;;
+        music)  printf '  → Musiikki: %s\n'          "$p_name" ;;
+        misc)   printf '  → Misc: %s\n'              "$p_name" ;;
+        esac
 
-    temp_monitor &
-    local temp_pid=$!
+        log "Levy $((disc_num+1)): $p_type | $p_name | $p_season | ep=$p_ep"
+        echo "  Odotetaan levyasemaa..."
+        local disc_idx; disc_idx=$(wait_for_disc)
 
-    # ── Vaihe 1: MakeMKV ──────────────────────────────────────────────────────
-    banner "Vaihe 1/3 — MakeMKV: häviötön raakakopiointi"
-    log "Ripataaan kaikki titleset levyltä '${disc_name}'..."
-    local t_mkv_start
-    t_mkv_start=$(date +%s)
+        (( disc_num++ ))
+        local raw_dir="${session_dir}/disc-$(printf '%03d' "$disc_num")"
+        mkdir -p "$raw_dir"
 
-    ( while true; do
-          sleep 15
-          local written
-          written=$(du -sh "$outdir" 2>/dev/null | cut -f1) || true
-          [[ -n "$written" ]] && log "  MakeMKV: kirjoitettu ${written}..."
-      done ) &
-    local monitor_pid=$!
+        {
+            echo "TYPE=${p_type}"
+            echo "NAME=${p_name}"
+            echo "SEASON=${p_season}"
+            echo "START_EP=${p_ep}"
+        } > "${raw_dir}/meta.conf"
 
-    run_logged makemkvcon mkv "disc:${disc_idx}" all "${outdir}/" \
-        || { kill "$monitor_pid" 2>/dev/null; wait "$monitor_pid" 2>/dev/null; die "MakeMKV epäonnistui."; }
+        log "MakeMKV rippaa disc ${disc_num}..."
+        local mkv_log="${raw_dir}/makemkv.log"
+        makemkvcon mkv "disc:${disc_idx}" all "${raw_dir}/" 2>&1 \
+            | tee -a "$LOGFILE" | tee "$mkv_log"
 
-    kill "$monitor_pid" 2>/dev/null; wait "$monitor_pid" 2>/dev/null || true
+        eject 2>/dev/null || true
 
-    log "MakeMKV valmis — kesto: $(elapsed $(( $(date +%s) - t_mkv_start )))"
+        local title_count
+        title_count=$(grep -c "was added" "$mkv_log" 2>/dev/null || echo 0)
+        log "Levy ${disc_num} ripattuna (${title_count} titletä). Levy ejectattu."
 
-    # Lajittelu _tNN-numeron mukaan (ei aakkosjärjestyksessä, joka olisi väärin)
-    mapfile -t all_raw_files < <(
-        find "$outdir" -maxdepth 1 -name "*_t*.mkv" -printf '%f\t%p\n' | \
-        python3 -c "
-import sys, re
-files = []
-for line in sys.stdin:
-    fname, path = line.strip().split('\t', 1)
-    m = re.search(r'_t(\d+)\.mkv$', fname)
-    files.append((int(m.group(1)) if m else 999, path))
-files.sort()
-print('\n'.join(p for _, p in files))
-"
-    )
-    (( ${#all_raw_files[@]} > 0 )) || die "MakeMKV ei tuottanut yhtään tiedostoa."
-
-    # Saniteettitarkistus: varmista että tiedostot eivät ole tyhjiä
-    for f in "${all_raw_files[@]}"; do
-        local sz
-        sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
-        (( sz > 1048576 )) || die "MakeMKV tuotti vajavaisen tiedoston: ${f##*/} (${sz} tavua) — rippaus epäonnistui."
-    done
-
-    log "Ripattiin ${#all_raw_files[@]} title(a) — tarkistetaan kestot..."
-
-    # Suodatetaan alle 60 sekunnin titleset pois ennen enkoodausta
-    local raw_files=()
-    for f in "${all_raw_files[@]}"; do
-        local dur
-        dur=$(title_duration_sec "$f")
-        local fps
-        fps=$(mediainfo --Inform="Video;%FrameRate%" "$f" 2>/dev/null || echo "?")
-        if (( dur < 60 )); then
-            log "  Ohitetaan: ${f##*/} (kesto ${dur}s < 60s)"
-            rm -f "$f"
-        else
-            # PAL speedup -tunnistus ei ole automatisoitavissa pelkän fps-arvon
-            # perusteella: eurooppalainen tv-sisältö on aidosti 25fps. Jos epäilet
-            # PAL speedup -ongelmaa (audio sävelkorkeus väärä, nopeutettu liike),
-            # lisää käsin: --rate 23.976 --cfr
-            log "  Mukaan: ${f##*/} (kesto ${dur}s, fps ${fps})"
-            raw_files+=("$f")
+        # Päivitä jaksonumero seuraavaa levyä varten
+        if [[ "$p_type" == series ]] && (( title_count > 0 )); then
+            p_ep=$(( p_ep + title_count ))
         fi
     done
 
-    (( ${#raw_files[@]} > 0 )) || die "Kaikki titleset suodatettiin pois (alle 60s) — tarkista levy."
-    log "Enkoodataan ${#raw_files[@]} title(a)."
-
-    local total=${#raw_files[@]}
-
-    # ── Vaihe 2: HandBrakeCLI ─────────────────────────────────────────────────
-    banner "Vaihe 2/3 — HandBrakeCLI: H.265-pakkaus"
-    log "Ääni:         kaikki raidat, copy pass-through (fallback aac)"
-    log "Tekstitykset: kaikki raidat"
-    log "Video:        x265 CRF 21, anamorphic loose, crop auto"
-    local t_mkv_elapsed=$(( $(date +%s) - t_mkv_start ))
-    local t_hb_start
-    t_hb_start=$(date +%s)
-
-    local i=0
-    for raw_file in "${raw_files[@]}"; do
-        local fname="${raw_file##*/}"
-        local dest_name
-        dest_name=$(dest_filename "$i" "$total")
-        local encoded_file="${encodedir}/${dest_name}"
-        local raw_size
-        raw_size=$(du -sh "$raw_file" | cut -f1)
-        local t_title_start
-        t_title_start=$(date +%s)
-
-        log "Title $(( i+1 ))/${total}: $fname ($raw_size) → $dest_name"
-
-        run_hb_logged HandBrakeCLI \
-            --input  "$raw_file" \
-            --output "$encoded_file" \
-            --encoder x265 \
-            --quality 21 \
-            --comb-detect \
-            --decomb \
-            --loose-anamorphic \
-            --crop-mode auto \
-            --all-audio \
-            --aencoder copy \
-            --audio-fallback aac \
-            --all-subtitles \
-            --markers \
-            || die "HandBrakeCLI epäonnistui: $fname"
-
-        [[ -s "$encoded_file" ]] || die "HandBrakeCLI ei tuottanut tiedostoa: $dest_name"
-        local encoded_size
-        encoded_size=$(du -sh "$encoded_file" | cut -f1)
-        log "Koko: $raw_size → $encoded_size  (kesto: $(elapsed $(( $(date +%s) - t_title_start ))))"
-        rm -f "$raw_file"
-        log "Raaka poistettu: $fname"
-        (( i++ )) || true
-    done
-    local t_hb_elapsed=$(( $(date +%s) - t_hb_start ))
-    log "HandBrakeCLI valmis — kesto: $(elapsed $t_hb_elapsed)"
-    kill "$temp_pid" 2>/dev/null; wait "$temp_pid" 2>/dev/null || true
-
-    # ── Vaihe 3: Siirrä kohteeseen ────────────────────────────────────────────
-    banner "Vaihe 3/3 — Siirto kohteeseen"
-
-    mkdir -p "$DEST_BASE"
-    log "Kohde: $DEST_BASE"
-
-    local moved=0
-    while IFS= read -r enc_file; do
-        local fname="${enc_file##*/}"
-        local dest_file="${DEST_BASE}/${fname}"
-        mv "$enc_file" "$dest_file"
-        log "Siirretty: $dest_file"
-        (( moved++ )) || true
-    done < <(find "$encodedir" -maxdepth 1 -name "*.mkv" | sort)
-
-    rmdir "$encodedir" 2>/dev/null || true
-    rmdir "$outdir"   2>/dev/null || true
-    (( moved > 0 )) || die "Ei siirrettyjä tiedostoja."
-
-    # Ejektointi ja kelkan sulkeminen
-    log "Ejektoidaan levy ($device_path)..."
-    if eject "$device_path" 2>/dev/null; then
-        log "Levy ejektoitu — suljetaan kelkka 15 sekunnin kuluttua..."
-        sleep 15
-        eject -t "$device_path" 2>/dev/null \
-            && log "Kelkka suljettu." \
-            || log "Varoitus: kelkan sulkeminen epäonnistui."
-    else
-        log "Varoitus: ejektointi epäonnistui — poista levy käsin."
+    if (( disc_num == 0 )); then
+        log "Ei levyjä ripattuna."; exit 0
     fi
 
-    local t_total=$(( $(date +%s) - t_total_start ))
-    banner "Kaikki valmis! — $(date '+%Y-%m-%d %H:%M:%S')"
-    log "Ajat:"
-    log "  MakeMKV rippaus:    $(elapsed $t_mkv_elapsed)"
-    log "  HandBrakeCLI enc.:  $(elapsed $t_hb_elapsed)"
-    log "  Yhteensä:           $(elapsed $t_total)"
-    log "Tiedostot Jellyfinissä: $DEST_BASE"
-    log ""
-    log "Käynnistä Jellyfin-skannaus: Dashboard → Libraries → Scan All Libraries"
+    echo ""
+    echo "══════════════════════════════════════════════"
+    printf '  %d levy/levyä ripattuna. Aloitetaan enkoodaus...\n' "$disc_num"
+    echo "══════════════════════════════════════════════"
+    echo ""
+
+    encode_session "$session_dir"
+
+    log "═══ Kaikki valmis! ═══"
 }
 
 main "$@"
