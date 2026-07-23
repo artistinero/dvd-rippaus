@@ -377,12 +377,19 @@ main() {
         makemkvcon mkv "disc:${disc_idx}" all "${raw_dir}/" 2>&1 \
             | tee -a "$LOGFILE" | tee "$mkv_log"
         local mkv_rc=${PIPESTATUS[0]}
-        (( mkv_rc != 0 )) && log "VAROITUS: MakeMKV päättyi virheeseen (rc=${mkv_rc}) — tarkista loki"
 
         eject 2>/dev/null || true
 
         local title_count
-        title_count=$(grep -c "was added" "$mkv_log" 2>/dev/null || echo 0)
+        title_count=$(find "$raw_dir" -maxdepth 1 -name "*_t*.mkv" 2>/dev/null | wc -l)
+
+        if (( mkv_rc != 0 )) || (( title_count == 0 )); then
+            log "VIRHE: MakeMKV epäonnistui (rc=${mkv_rc}, tiedostoja=${title_count}) — levy ${disc_num} ohitetaan"
+            rm -rf "$raw_dir"
+            (( disc_num-- )) || true
+            continue
+        fi
+
         log "Levy ${disc_num} ripattuna (${title_count} titletä). Levy ejectattu."
 
         # Päivitä jaksonumero seuraavaa levyä varten
