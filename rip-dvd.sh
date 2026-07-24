@@ -19,7 +19,7 @@ DEST_ROOT="/mnt/terastation/dlna/vids"
 LOGFILE="/home/keitsi/rip-dvd.log"
 TEMP_WARN=85
 TEMP_RESUME=65
-MIN_DURATION=60  # sekuntia — lyhyemmät titleset ohitetaan
+MIN_DURATION=60  # sekuntia — lyhyemmät raidat ohitetaan
 
 # ── Apufunktiot ───────────────────────────────────────────────────────────────
 
@@ -296,7 +296,7 @@ encode_session() {
             [[ -z "$dvd_dir" ]] && { log "VIRHE: dvdbackup ei löydy — ${raw_dir##*/}"; continue; }
             local titles=()
             while IFS= read -r t; do titles+=("$t"); done < <(hb_scan_long_titles "$dvd_dir")
-            (( ${#titles[@]} == 0 )) && { log "VAROITUS: ei titleitä — ${raw_dir##*/}"; continue; }
+            (( ${#titles[@]} == 0 )) && { log "VAROITUS: ei raitoja — ${raw_dir##*/}"; continue; }
             local i=1 total=${#titles[@]}
             for t in "${titles[@]}"; do
                 local out_name
@@ -337,7 +337,7 @@ encode_session() {
 
     local total_titles; total_titles=$(wc -l < "$queue")
     local total_discs=$(( disc_seq - 1 ))
-    log "Jonossa $total_titles titletä / $total_discs levyä enkoodattavana."
+    log "Jonossa $total_titles raitaa / $total_discs levyä enkoodattavana."
     (( total_titles == 0 )) && { log "Ei enkoodattavaa."; return; }
 
     # ── Enkoodaussilmukka ─────────────────────────────────────────────────────
@@ -547,11 +547,11 @@ for u, d in [('G', 1024**3), ('M', 1024**2)]:
             continue
         fi
         echo "RIP_MODE=dvdbackup" >> "${raw_dir}/meta.conf"
-        log "dvdbackup onnistui (${vob_count} VOB). Skannataan titleit..."
+        log "dvdbackup onnistui (${vob_count} VOB). Skannataan raidat..."
         local dvd_inner; dvd_inner=$(find "$dv_dir" -mindepth 1 -maxdepth 1 -type d | head -1)
         local title_count
         title_count=$(hb_scan_long_titles "$dvd_inner" | wc -l)
-        log "Levy ${disc_num} ripattuna (${title_count} titletä)."
+        log "Levy ${disc_num} ripattuna (${title_count} raitaa)."
 
         eject "$disc_dev" 2>/dev/null || true
 
