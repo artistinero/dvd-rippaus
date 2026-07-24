@@ -79,7 +79,7 @@ run_hb() {
         --loose-anamorphic --crop-mode auto \
         --all-audio --aencoder copy --audio-fallback aac \
         --all-subtitles --markers \
-        2>&1 | python3 -c '
+        </dev/null 2>&1 | python3 -c '
 import sys, re, time
 label = sys.argv[2] if len(sys.argv) > 2 else ""
 last_pct = -5
@@ -156,7 +156,7 @@ print(int(float(v)/1000) if v else 0)" 2>/dev/null || echo 0
 hb_scan_long_titles() {
     # Scan DVD directory and print title numbers that are >= MIN_DURATION seconds
     local dvd_dir="$1"
-    HandBrakeCLI -i "$dvd_dir" -t 0 --scan 2>&1 | python3 -c "
+    HandBrakeCLI -i "$dvd_dir" -t 0 --scan </dev/null 2>&1 | python3 -c "
 import sys, re
 min_dur = $MIN_DURATION
 cur = None
