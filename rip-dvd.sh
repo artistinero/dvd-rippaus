@@ -279,6 +279,7 @@ encode_session() {
     local queue="${session_dir}/.queue"
     > "$queue"
     log "Skannataan levyt..."
+    local disc_seq=1
     while IFS= read -r mf; do
         local raw_dir; raw_dir=$(dirname "$mf")
         local type name season ep rip_mode
@@ -304,9 +305,9 @@ encode_session() {
                 *)  (( total==1 )) && out_name="${name}.mkv" \
                                    || out_name="${name} - Part $(printf '%02d' "$i").mkv" ;;
                 esac
-                # format: dvdbackup|dvd_dir|out_name|dest|title_num|disc_label
-                printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
-                    "dvdbackup" "$dvd_dir" "$out_name" "$dest" "$t" "${raw_dir##*/}" >> "$queue"
+                # format: mode|src|out_name|dest|title_num|disc_label|disc_seq
+                printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+                    "dvdbackup" "$dvd_dir" "$out_name" "$dest" "$t" "${raw_dir##*/}" "$disc_seq" >> "$queue"
                 [[ "$type" == series ]] && (( ep++ )) || true
                 (( i++ )) || true
             done
@@ -325,16 +326,18 @@ encode_session() {
                 *)  (( total==1 )) && out_name="${name}.mkv" \
                                    || out_name="${name} - Part $(printf '%02d' "$i").mkv" ;;
                 esac
-                printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
-                    "mkv" "$raw" "$out_name" "$dest" "" "${raw_dir##*/}" >> "$queue"
+                printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+                    "mkv" "$raw" "$out_name" "$dest" "" "${raw_dir##*/}" "$disc_seq" >> "$queue"
                 [[ "$type" == series ]] && (( ep++ )) || true
                 (( i++ )) || true
             done
         fi
+        (( disc_seq++ )) || true
     done < <(find "$session_dir" -name "meta.conf" | sort)
 
     local total_titles; total_titles=$(wc -l < "$queue")
-    log "Jonossa $total_titles titletä enkoodattavana."
+    local total_discs=$(( disc_seq - 1 ))
+    log "Jonossa $total_titles titletä / $total_discs levyä enkoodattavana."
     (( total_titles == 0 )) && { log "Ei enkoodattavaa."; return; }
 
     # ── Enkoodaussilmukka ─────────────────────────────────────────────────────
@@ -346,9 +349,17 @@ encode_session() {
     local enc_dir="${session_dir}/encoded"
     mkdir -p "$enc_dir"
 
-    while IFS=$'\x1f' read -r mode src out_name dest title_num disc_label; do
+    local prev_src="" prev_mode=""
+    while IFS=$'\x1f' read -r mode src out_name dest title_num disc_label disc_n; do
         (( done_n++ )) || true
         local remaining=$(( total_titles - done_n + 1 ))
+
+        # ── Siivoa edellisen levyn lähde kun siirrytään uuteen ───────────────
+        if [[ "$prev_mode" == "dvdbackup" && -n "$prev_src" && "$src" != "$prev_src" ]]; then
+            rm -rf "$prev_src"
+            log "  Siivottu lähde: ${prev_src##*/}"
+        fi
+        prev_src="$src"; prev_mode="$mode"
 
         # ── Palautuminen: ohita jos jo terastationilla (>100MB) ──────────────
         if [[ -f "${dest}/${out_name}" ]] && \
@@ -362,7 +373,8 @@ encode_session() {
         # ── Edistymisraportti ─────────────────────────────────────────────────
         echo "" >&2
         printf '  ╔══════════════════════════════════════════╗\n' >&2
-        printf '  ║  Jakso %d / %d   |   %s\n' "$done_n" "$total_titles" "$out_name" >&2
+        printf '  ║  Levy %d / %d  |  Jakso %d / %d\n' "$disc_n" "$total_discs" "$done_n" "$total_titles" >&2
+        printf '  ║  %s\n' "$out_name" >&2
         if (( done_n > 1 )); then
             local elapsed=$(( $(date +%s) - session_start ))
             local avg=$(( elapsed / (done_n - 1) ))
@@ -396,6 +408,12 @@ encode_session() {
         fi
 
     done < "$queue"
+
+    # Siivoa viimeisen levyn lähde
+    if [[ "$prev_mode" == "dvdbackup" && -n "$prev_src" && -d "$prev_src" ]]; then
+        rm -rf "$prev_src"
+        log "  Siivottu lähde: ${prev_src##*/}"
+    fi
 
     local total_secs=$(( $(date +%s) - session_start ))
     local hb; hb=$(pgrep -x HandBrakeCLI 2>/dev/null || true)
