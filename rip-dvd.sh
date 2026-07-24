@@ -60,10 +60,17 @@ throttle_loop() {
     done
 }
 
+fmt_time() {
+    local s=$1
+    local h=$(( s/3600 )) m=$(( (s%3600)/60 ))
+    (( h > 0 )) && printf '%dh %dmin' "$h" "$m" || printf '%dmin' "$m"
+}
+
 run_hb() {
-    # $1=input $2=output [$3=title number for DVD/VIDEO_TS input]
+    # $1=input $2=output [$3=title number] [$4=label for progress e.g. "S03E01"]
     local title_arg=()
     [[ -n "${3:-}" ]] && title_arg=(--title "$3")
+    local label="${4:-}"
     HandBrakeCLI \
         --input "$1" "${title_arg[@]}" --output "$2" \
         --encoder x265 --quality 21 \
@@ -72,7 +79,8 @@ run_hb() {
         --all-audio --aencoder copy --audio-fallback aac \
         --all-subtitles --markers \
         2>&1 | python3 -c '
-import sys, re
+import sys, re, time
+label = sys.argv[2] if len(sys.argv) > 2 else ""
 last_pct = -5
 buf = b""
 stdin_b = sys.stdin.buffer
@@ -86,22 +94,25 @@ with open(sys.argv[1], "a") as lf:
             break
         if ch == b"\r":
             line = buf.decode("utf-8", errors="replace")
-            sys.stdout.write(line + "\r"); sys.stdout.flush()
-            m = re.search(r"(\d+\.\d+) %", line)
+            sys.stdout.write("\r  " + line.strip()); sys.stdout.flush()
+            m = re.search(r"(\d+\.\d+) %.*ETA\s+(\S+)", line)
             if m:
                 pct = float(m.group(1))
+                eta = m.group(2)
                 if pct - last_pct >= 5:
                     last_pct = pct
-                    lf.write("  " + line.strip() + "\n"); lf.flush()
+                    msg = f"  [{label}] {pct:.1f}%  ETA {eta}"
+                    lf.write(msg + "\n"); lf.flush()
             buf = b""
         elif ch == b"\n":
             line = buf.decode("utf-8", errors="replace")
-            sys.stdout.write(line + "\n"); sys.stdout.flush()
-            lf.write(line + "\n"); lf.flush()
+            if "warning" not in line.lower() and line.strip():
+                sys.stdout.write("\n" + line); sys.stdout.flush()
+                lf.write(line); lf.flush()
             buf = b""
         else:
             buf += ch
-' "$LOGFILE"
+' "$LOGFILE" "$label"
     return "${PIPESTATUS[0]}"
 }
 
@@ -256,129 +267,142 @@ print(max(n)+1 if n else 1)" 2>/dev/null || echo 1)
 
 encode_session() {
     local session_dir="$1"
-    # Odota jos toinen HandBrake on jo käynnissä (esim. edellinen levy enkoodataan erikseen)
+
     if pgrep -x HandBrakeCLI >/dev/null 2>&1; then
-        log "HandBrake käynnissä muualla — odotetaan sen valmistumista ennen enkoodauksen aloitusta..."
+        log "HandBrake käynnissä muualla — odotetaan..."
         while pgrep -x HandBrakeCLI >/dev/null 2>&1; do sleep 30; done
-        log "Edellinen enkoodaus valmis. Aloitetaan oma enkoodausvaihe."
+        log "Edellinen enkoodaus valmis."
     fi
     log "═══ Enkoodausvaihe alkaa ═══"
 
-    throttle_loop &
-    local tpid=$!
-    trap "kill $tpid 2>/dev/null; exit" INT TERM
-
+    # ── Esiskannaus: rakennetaan enkoodausjono tiedostoon ────────────────────
+    local queue="${session_dir}/.queue"
+    > "$queue"
+    log "Skannataan levyt..."
     while IFS= read -r mf; do
         local raw_dir; raw_dir=$(dirname "$mf")
-        local type name season ep
-        type=$(grep   '^TYPE='     "$mf" | cut -d= -f2-)
-        name=$(grep   '^NAME='     "$mf" | cut -d= -f2-)
-        season=$(grep '^SEASON='   "$mf" | cut -d= -f2-)
-        ep=$(grep     '^START_EP=' "$mf" | cut -d= -f2-)
-
-        local rip_mode; rip_mode=$(grep '^RIP_MODE=' "$mf" | cut -d= -f2 || echo "makemkv")
-
+        local type name season ep rip_mode
+        type=$(grep    '^TYPE='     "$mf" | cut -d= -f2-)
+        name=$(grep    '^NAME='     "$mf" | cut -d= -f2-)
+        season=$(grep  '^SEASON='   "$mf" | cut -d= -f2-)
+        ep=$(grep      '^START_EP=' "$mf" | cut -d= -f2-)
+        rip_mode=$(grep '^RIP_MODE=' "$mf" | cut -d= -f2 || echo "makemkv")
         local dest; dest=$(dest_path "$type" "$name" "$season")
-        mkdir -p "$dest"
-        local enc_dir="${raw_dir}/encoded"
-        mkdir -p "$enc_dir"
 
         if [[ "$rip_mode" == "dvdbackup" ]]; then
-            # DVD on kopioitu dvdbackupilla — enkoodataan suoraan VIDEO_TS-hakemistosta
             local dvd_dir
             dvd_dir=$(find "${raw_dir}/dvdbackup" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)
-            if [[ -z "$dvd_dir" ]]; then
-                log "VIRHE: dvdbackup-hakemistoa ei löydy — ${raw_dir##*/}"; continue
-            fi
-            log "  Skannataan titleit: ${dvd_dir##*/}"
+            [[ -z "$dvd_dir" ]] && { log "VIRHE: dvdbackup ei löydy — ${raw_dir##*/}"; continue; }
             local titles=()
             while IFS= read -r t; do titles+=("$t"); done < <(hb_scan_long_titles "$dvd_dir")
-            if (( ${#titles[@]} == 0 )); then
-                log "VAROITUS: Ei pitkiä titleitä — ${raw_dir##*/}"; continue
-            fi
-            local total=${#titles[@]} i=1
+            (( ${#titles[@]} == 0 )) && { log "VAROITUS: ei titleitä — ${raw_dir##*/}"; continue; }
+            local i=1 total=${#titles[@]}
             for t in "${titles[@]}"; do
                 local out_name
                 case "$type" in
                 series) out_name="${name} S$(printf '%02d' "$season")E$(printf '%02d' "$ep").mkv" ;;
-                *)
-                    if (( total == 1 )); then out_name="${name}.mkv"
-                    else out_name="${name} - Part $(printf '%02d' "$i").mkv"
-                    fi ;;
+                *)  (( total==1 )) && out_name="${name}.mkv" \
+                                   || out_name="${name} - Part $(printf '%02d' "$i").mkv" ;;
                 esac
-                local out="${enc_dir}/${out_name}"
-                log "Enkoodataan (${i}/${total}): title ${t} → ${out_name}"
-                run_hb "$dvd_dir" "$out" "$t"
-                local rc=$?
-                if (( rc == 0 )) && [[ -s "$out" ]]; then
-                    local sz; sz=$(du -sh "$out" | cut -f1)
-                    mv "$out" "${dest}/"
-                    log "  ✓ ${out_name} (${sz})"
-                else
-                    log "  VIRHE: enkoodaus epäonnistui — title ${t}"
-                fi
+                # format: dvdbackup|dvd_dir|out_name|dest|title_num|disc_label
+                printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+                    "dvdbackup" "$dvd_dir" "$out_name" "$dest" "$t" "${raw_dir##*/}" >> "$queue"
                 [[ "$type" == series ]] && (( ep++ )) || true
                 (( i++ )) || true
             done
         else
-            # MakeMKV-tila: suodata titleset keston mukaan
             local filtered=()
             while IFS= read -r f; do
                 [[ -f "$f" ]] || continue
                 local dur; dur=$(title_dur "$f")
-                if (( dur >= MIN_DURATION )); then
-                    filtered+=("$f")
-                else
-                    log "  Ohitetaan: ${f##*/} (${dur}s)"; rm -f "$f"
-                fi
+                (( dur >= MIN_DURATION )) && filtered+=("$f") || { log "  Ohitetaan: ${f##*/} (${dur}s)"; rm -f "$f"; }
             done < <(sorted_titles "$raw_dir")
-
-            if (( ${#filtered[@]} == 0 )); then
-                log "VAROITUS: Ei enkoodattavia — ${raw_dir##*/}"; continue
-            fi
-
-            local total=${#filtered[@]} i=1
+            local i=1 total=${#filtered[@]}
             for raw in "${filtered[@]}"; do
                 local out_name
                 case "$type" in
-                series)
-                    out_name="${name} S$(printf '%02d' "$season")E$(printf '%02d' "$ep").mkv"
-                    ;;
-                *)
-                    if (( total == 1 )); then
-                        out_name="${name}.mkv"
-                    else
-                        out_name="${name} - Part $(printf '%02d' "$i").mkv"
-                    fi
-                    ;;
+                series) out_name="${name} S$(printf '%02d' "$season")E$(printf '%02d' "$ep").mkv" ;;
+                *)  (( total==1 )) && out_name="${name}.mkv" \
+                                   || out_name="${name} - Part $(printf '%02d' "$i").mkv" ;;
                 esac
-
-                local out="${enc_dir}/${out_name}"
-                log "Enkoodataan (${i}/${total}): ${raw##*/} → ${out_name}"
-                run_hb "$raw" "$out"
-                local rc=$?
-
-                if (( rc == 0 )) && [[ -s "$out" ]]; then
-                    local sz; sz=$(du -sh "$out" | cut -f1)
-                    mv "$out" "${dest}/"
-                    rm -f "$raw"
-                    log "  ✓ ${out_name} (${sz})"
-                else
-                    log "  VIRHE: enkoodaus epäonnistui — ${raw##*/} (raakadata jää ${raw_dir}/)"
-                fi
-
+                printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+                    "mkv" "$raw" "$out_name" "$dest" "" "${raw_dir##*/}" >> "$queue"
                 [[ "$type" == series ]] && (( ep++ )) || true
                 (( i++ )) || true
             done
         fi
-
     done < <(find "$session_dir" -name "meta.conf" | sort)
 
+    local total_titles; total_titles=$(wc -l < "$queue")
+    log "Jonossa $total_titles titletä enkoodattavana."
+    (( total_titles == 0 )) && { log "Ei enkoodattavaa."; return; }
+
+    # ── Enkoodaussilmukka ─────────────────────────────────────────────────────
+    throttle_loop &
+    local tpid=$!
+    trap "kill $tpid 2>/dev/null; exit" INT TERM
+
+    local done_n=0 session_start; session_start=$(date +%s)
+    local enc_dir="${session_dir}/encoded"
+    mkdir -p "$enc_dir"
+
+    while IFS=$'\x1f' read -r mode src out_name dest title_num disc_label; do
+        (( done_n++ )) || true
+        local remaining=$(( total_titles - done_n + 1 ))
+
+        # ── Palautuminen: ohita jos jo terastationilla (>100MB) ──────────────
+        if [[ -f "${dest}/${out_name}" ]] && \
+           [[ $(stat -c%s "${dest}/${out_name}" 2>/dev/null || echo 0) -gt 104857600 ]]; then
+            log "  Ohitetaan (jo valmis): ${out_name}"
+            continue
+        fi
+        # Siivoa mahdollinen aiempi keskeytynyt tiedosto
+        rm -f "${enc_dir}/${out_name}"
+
+        # ── Edistymisraportti ─────────────────────────────────────────────────
+        echo "" >&2
+        printf '  ╔══════════════════════════════════════════╗\n' >&2
+        printf '  ║  Jakso %d / %d   |   %s\n' "$done_n" "$total_titles" "$out_name" >&2
+        if (( done_n > 1 )); then
+            local elapsed=$(( $(date +%s) - session_start ))
+            local avg=$(( elapsed / (done_n - 1) ))
+            local eta_secs=$(( avg * (total_titles - done_n + 1) ))
+            printf '  ║  Kokonais-ETA: ~%s  (%d jäljellä)\n' "$(fmt_time "$eta_secs")" "$remaining" >&2
+        fi
+        printf '  ╚══════════════════════════════════════════╝\n' >&2
+        log "Enkoodataan ($done_n/$total_titles): ${out_name} [${disc_label}]"
+
+        # ── Enkoodaus ─────────────────────────────────────────────────────────
+        local t_start; t_start=$(date +%s)
+        local out="${enc_dir}/${out_name}"
+        mkdir -p "$dest"
+
+        if [[ "$mode" == "dvdbackup" ]]; then
+            run_hb "$src" "$out" "$title_num" "$out_name"
+        else
+            run_hb "$src" "$out" "" "$out_name"
+        fi
+        local rc=$?
+
+        local t_secs=$(( $(date +%s) - t_start ))
+        if (( rc == 0 )) && [[ -s "$out" ]]; then
+            local sz; sz=$(du -sh "$out" | cut -f1)
+            mv "$out" "${dest}/"
+            [[ "$mode" == "mkv" ]] && rm -f "$src"
+            log "  ✓ ${out_name} (${sz}, $(fmt_time "$t_secs"))"
+        else
+            rm -f "$out"
+            log "  VIRHE: enkoodaus epäonnistui — ${out_name} ($(fmt_time "$t_secs"))"
+        fi
+
+    done < "$queue"
+
+    local total_secs=$(( $(date +%s) - session_start ))
     local hb; hb=$(pgrep -x HandBrakeCLI 2>/dev/null || true)
     [[ -n "$hb" ]] && kill -CONT "$hb" 2>/dev/null || true
     kill "$tpid" 2>/dev/null || true
     trap - INT TERM
-    log "═══ Enkoodaus valmis ═══"
+    log "═══ Enkoodaus valmis — yhteensä $(fmt_time "$total_secs") ═══"
 }
 
 # ── Pääohjelma ────────────────────────────────────────────────────────────────
