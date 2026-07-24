@@ -61,9 +61,11 @@ throttle_loop() {
 }
 
 run_hb() {
-    # $1=input $2=output — suodattaa HandBraken \r-progress-spämin lokista
+    # $1=input $2=output [$3=title number for DVD/VIDEO_TS input]
+    local title_arg=()
+    [[ -n "${3:-}" ]] && title_arg=(--title "$3")
     HandBrakeCLI \
-        --input "$1" --output "$2" \
+        --input "$1" "${title_arg[@]}" --output "$2" \
         --encoder x265 --quality 21 \
         --comb-detect --decomb \
         --loose-anamorphic --crop-mode auto \
@@ -104,6 +106,7 @@ with open(sys.argv[1], "a") as lf:
 }
 
 wait_for_disc() {
+    # Returns "disc_index /dev/srN"
     local info=""
     while [[ -z "$info" ]]; do
         info=$(makemkvcon -r info disc:9999 2>/dev/null | python3 -c "
@@ -111,7 +114,7 @@ import sys, re
 for line in sys.stdin:
     m = re.match(r'^DRV:(\d+),\d+,\d+,\d+,\"[^\"]*\",\"([^\"]+)\",\"([^\"]+)\"', line.strip())
     if m:
-        print(m.group(1))
+        print(m.group(1) + ' ' + m.group(3))
         break
 " 2>/dev/null || true)
         [[ -z "$info" ]] && sleep 10
@@ -136,6 +139,28 @@ title_dur() {
     mediainfo --Inform="Video;%Duration%" "$1" 2>/dev/null | python3 -c "
 import sys; v=sys.stdin.read().strip()
 print(int(float(v)/1000) if v else 0)" 2>/dev/null || echo 0
+}
+
+hb_scan_long_titles() {
+    # Scan DVD directory and print title numbers that are >= MIN_DURATION seconds
+    local dvd_dir="$1"
+    HandBrakeCLI -i "$dvd_dir" -t 0 --scan 2>&1 | python3 -c "
+import sys, re
+min_dur = $MIN_DURATION
+cur = None
+for line in sys.stdin.buffer:
+    line = line.decode('utf-8', errors='replace')
+    m = re.search(r'scan: scanning title (\d+)', line)
+    if m:
+        cur = int(m.group(1))
+    m2 = re.search(r'scan: duration is (\d+):(\d+):(\d+)', line)
+    if m2 and cur is not None:
+        h,mn,s = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
+        dur = h*3600 + mn*60 + s
+        if dur >= min_dur:
+            print(cur)
+        cur = None
+"
 }
 
 dest_path() {
@@ -231,6 +256,12 @@ print(max(n)+1 if n else 1)" 2>/dev/null || echo 1)
 
 encode_session() {
     local session_dir="$1"
+    # Odota jos toinen HandBrake on jo käynnissä (esim. edellinen levy enkoodataan erikseen)
+    if pgrep -x HandBrakeCLI >/dev/null 2>&1; then
+        log "HandBrake käynnissä muualla — odotetaan sen valmistumista ennen enkoodauksen aloitusta..."
+        while pgrep -x HandBrakeCLI >/dev/null 2>&1; do sleep 30; done
+        log "Edellinen enkoodaus valmis. Aloitetaan oma enkoodausvaihe."
+    fi
     log "═══ Enkoodausvaihe alkaa ═══"
 
     throttle_loop &
@@ -245,60 +276,101 @@ encode_session() {
         season=$(grep '^SEASON='   "$mf" | cut -d= -f2-)
         ep=$(grep     '^START_EP=' "$mf" | cut -d= -f2-)
 
-        # Suodata titleset keston mukaan
-        local filtered=()
-        while IFS= read -r f; do
-            [[ -f "$f" ]] || continue
-            local dur; dur=$(title_dur "$f")
-            if (( dur >= MIN_DURATION )); then
-                filtered+=("$f")
-            else
-                log "  Ohitetaan: ${f##*/} (${dur}s)"; rm -f "$f"
-            fi
-        done < <(sorted_titles "$raw_dir")
-
-        if (( ${#filtered[@]} == 0 )); then
-            log "VAROITUS: Ei enkoodattavia — ${raw_dir##*/}"; continue
-        fi
+        local rip_mode; rip_mode=$(grep '^RIP_MODE=' "$mf" | cut -d= -f2 || echo "makemkv")
 
         local dest; dest=$(dest_path "$type" "$name" "$season")
         mkdir -p "$dest"
         local enc_dir="${raw_dir}/encoded"
         mkdir -p "$enc_dir"
 
-        local total=${#filtered[@]} i=1
-        for raw in "${filtered[@]}"; do
-            local out_name
-            case "$type" in
-            series)
-                out_name="${name} S$(printf '%02d' "$season")E$(printf '%02d' "$ep").mkv"
-                ;;
-            *)
-                if (( total == 1 )); then
-                    out_name="${name}.mkv"
+        if [[ "$rip_mode" == "dvdbackup" ]]; then
+            # DVD on kopioitu dvdbackupilla — enkoodataan suoraan VIDEO_TS-hakemistosta
+            local dvd_dir
+            dvd_dir=$(find "${raw_dir}/dvdbackup" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)
+            if [[ -z "$dvd_dir" ]]; then
+                log "VIRHE: dvdbackup-hakemistoa ei löydy — ${raw_dir##*/}"; continue
+            fi
+            log "  Skannataan titleit: ${dvd_dir##*/}"
+            local titles=()
+            while IFS= read -r t; do titles+=("$t"); done < <(hb_scan_long_titles "$dvd_dir")
+            if (( ${#titles[@]} == 0 )); then
+                log "VAROITUS: Ei pitkiä titleitä — ${raw_dir##*/}"; continue
+            fi
+            local total=${#titles[@]} i=1
+            for t in "${titles[@]}"; do
+                local out_name
+                case "$type" in
+                series) out_name="${name} S$(printf '%02d' "$season")E$(printf '%02d' "$ep").mkv" ;;
+                *)
+                    if (( total == 1 )); then out_name="${name}.mkv"
+                    else out_name="${name} - Part $(printf '%02d' "$i").mkv"
+                    fi ;;
+                esac
+                local out="${enc_dir}/${out_name}"
+                log "Enkoodataan (${i}/${total}): title ${t} → ${out_name}"
+                run_hb "$dvd_dir" "$out" "$t"
+                local rc=$?
+                if (( rc == 0 )) && [[ -s "$out" ]]; then
+                    local sz; sz=$(du -sh "$out" | cut -f1)
+                    mv "$out" "${dest}/"
+                    log "  ✓ ${out_name} (${sz})"
                 else
-                    out_name="${name} - Part $(printf '%02d' "$i").mkv"
+                    log "  VIRHE: enkoodaus epäonnistui — title ${t}"
                 fi
-                ;;
-            esac
+                [[ "$type" == series ]] && (( ep++ )) || true
+                (( i++ )) || true
+            done
+        else
+            # MakeMKV-tila: suodata titleset keston mukaan
+            local filtered=()
+            while IFS= read -r f; do
+                [[ -f "$f" ]] || continue
+                local dur; dur=$(title_dur "$f")
+                if (( dur >= MIN_DURATION )); then
+                    filtered+=("$f")
+                else
+                    log "  Ohitetaan: ${f##*/} (${dur}s)"; rm -f "$f"
+                fi
+            done < <(sorted_titles "$raw_dir")
 
-            local out="${enc_dir}/${out_name}"
-            log "Enkoodataan (${i}/${total}): ${raw##*/} → ${out_name}"
-            run_hb "$raw" "$out"
-            local rc=$?
-
-            if (( rc == 0 )) && [[ -s "$out" ]]; then
-                local sz; sz=$(du -sh "$out" | cut -f1)
-                mv "$out" "${dest}/"
-                rm -f "$raw"
-                log "  ✓ ${out_name} (${sz})"
-            else
-                log "  VIRHE: enkoodaus epäonnistui — ${raw##*/} (raakadata jää ${raw_dir}/)"
+            if (( ${#filtered[@]} == 0 )); then
+                log "VAROITUS: Ei enkoodattavia — ${raw_dir##*/}"; continue
             fi
 
-            [[ "$type" == series ]] && (( ep++ )) || true
-            (( i++ )) || true
-        done
+            local total=${#filtered[@]} i=1
+            for raw in "${filtered[@]}"; do
+                local out_name
+                case "$type" in
+                series)
+                    out_name="${name} S$(printf '%02d' "$season")E$(printf '%02d' "$ep").mkv"
+                    ;;
+                *)
+                    if (( total == 1 )); then
+                        out_name="${name}.mkv"
+                    else
+                        out_name="${name} - Part $(printf '%02d' "$i").mkv"
+                    fi
+                    ;;
+                esac
+
+                local out="${enc_dir}/${out_name}"
+                log "Enkoodataan (${i}/${total}): ${raw##*/} → ${out_name}"
+                run_hb "$raw" "$out"
+                local rc=$?
+
+                if (( rc == 0 )) && [[ -s "$out" ]]; then
+                    local sz; sz=$(du -sh "$out" | cut -f1)
+                    mv "$out" "${dest}/"
+                    rm -f "$raw"
+                    log "  ✓ ${out_name} (${sz})"
+                else
+                    log "  VIRHE: enkoodaus epäonnistui — ${raw##*/} (raakadata jää ${raw_dir}/)"
+                fi
+
+                [[ "$type" == series ]] && (( ep++ )) || true
+                (( i++ )) || true
+            done
+        fi
 
     done < <(find "$session_dir" -name "meta.conf" | sort)
 
@@ -317,15 +389,25 @@ main() {
 
     mountpoint -q /mnt/terastation/dlna \
         || die "Terastation ei ole mountattu — tarkista verkkoasema"
-    command -v makemkvcon  &>/dev/null || die "makemkvcon ei löydy"
     command -v HandBrakeCLI &>/dev/null || die "HandBrakeCLI ei löydy"
     command -v mediainfo   &>/dev/null || die "mediainfo ei löydy"
+    command -v dvdbackup   &>/dev/null || die "dvdbackup ei löydy — asenna: apt install dvdbackup"
 
-    local free_gb
-    free_gb=$(df "$OUTBASE" | awk 'NR==2 {printf "%d", $4/1024/1024}')
-    (( free_gb < 10 )) \
-        && log "VAROITUS: Vapaata tilaa vain ${free_gb} GB — levytila voi loppua kesken"
-    log "Valmis. Vapaata tilaa: ${free_gb} GB"
+    check_space() {
+        local local_gb tera_gb
+        local_gb=$(df "$OUTBASE" | awk 'NR==2 {printf "%d", $4/1024/1024}')
+        tera_gb=$(df "$DEST_ROOT" | awk 'NR==2 {printf "%d", $4/1024/1024}')
+        log "Tilaa: brainbin ${local_gb} GB vapaana, terastation ${tera_gb} GB vapaana"
+        # Yksi levy vie ~7GB rippaus + enkoodauksen väliaikaiset tiedostot.
+        # Varoitus jos tilaa alle 2 levylle (14GB), pysäytys jos alle 1 levylle (8GB).
+        (( local_gb < 14 )) && log "VAROITUS: Brainbinillä vain ${local_gb} GB — tilaa ehkä vain yhdelle levylle"
+        (( local_gb <  8 )) && die "Brainbinillä ei riitä tilaa seuraavalle levylle (${local_gb} GB) — pysäytetään"
+        # Terastationilla enkoodattu jakso ~600MB, varoitus alle 20GB, pysäytys alle 5GB
+        (( tera_gb  < 20 )) && log "VAROITUS: Terastationilla vain ${tera_gb} GB — enkoodaus voi epäonnistua"
+        (( tera_gb  <  5 )) && die "Terastationilla kriittisen vähän tilaa (${tera_gb} GB) — pysäytetään"
+    }
+
+    check_space
 
     local session_dir="${OUTBASE}/session_$(date +%Y%m%d_%H%M%S)"
     mkdir -p "$session_dir"
@@ -357,9 +439,12 @@ main() {
 
         [[ -z "$p_name" ]] && continue  # ask_meta palautti virhe
 
+        check_space
         log "Levy $((disc_num+1)): $p_type | $p_name | $p_season | ep=$p_ep"
         echo "  Odotetaan levyasemaa..."
-        local disc_idx; disc_idx=$(wait_for_disc)
+        local disc_info; disc_info=$(wait_for_disc)
+        local disc_idx="${disc_info%% *}"
+        local disc_dev="${disc_info##* }"
 
         (( disc_num++ ))
         local raw_dir="${session_dir}/disc-$(printf '%03d' "$disc_num")"
@@ -372,25 +457,42 @@ main() {
             echo "START_EP=${p_ep}"
         } > "${raw_dir}/meta.conf"
 
-        log "MakeMKV rippaa disc ${disc_num}..."
+        log "Ripataan disc ${disc_num} dvdbackupilla (${disc_dev})..."
         local mkv_log="${raw_dir}/makemkv.log"
-        makemkvcon mkv "disc:${disc_idx}" all "${raw_dir}/" 2>&1 \
+        local dv_dir="${raw_dir}/dvdbackup"
+        mkdir -p "$dv_dir"
+
+        # Taustaprosessi näyttää edistymisen 10s välein
+        ( while true; do
+            sleep 10
+            local sz; sz=$(du -sh "$dv_dir" 2>/dev/null | cut -f1)
+            printf '\r  [rippaus] %s kopioitu...' "$sz" >&2
+          done ) &
+        local progress_pid=$!
+
+        dvdbackup -i "$disc_dev" -o "$dv_dir" -M 2>&1 \
             | tee -a "$LOGFILE" | tee "$mkv_log"
-        local mkv_rc=${PIPESTATUS[0]}
 
-        eject 2>/dev/null || true
+        kill "$progress_pid" 2>/dev/null; wait "$progress_pid" 2>/dev/null || true
+        printf '\n' >&2
 
-        local title_count
-        title_count=$(find "$raw_dir" -maxdepth 1 -name "*_t*.mkv" 2>/dev/null | wc -l)
-
-        if (( mkv_rc != 0 )) || (( title_count == 0 )); then
-            log "VIRHE: MakeMKV epäonnistui (rc=${mkv_rc}, tiedostoja=${title_count}) — levy ${disc_num} ohitetaan"
+        local vob_count
+        vob_count=$(find "$dv_dir" -name "VTS_*_[1-9].VOB" -size +10M 2>/dev/null | wc -l)
+        if (( vob_count == 0 )); then
+            log "VIRHE: dvdbackup epäonnistui — levy ${disc_num} ohitetaan"
+            eject "$disc_dev" 2>/dev/null || true
             rm -rf "$raw_dir"
             (( disc_num-- )) || true
             continue
         fi
+        echo "RIP_MODE=dvdbackup" >> "${raw_dir}/meta.conf"
+        log "dvdbackup onnistui (${vob_count} VOB). Skannataan titleit..."
+        local dvd_inner; dvd_inner=$(find "$dv_dir" -mindepth 1 -maxdepth 1 -type d | head -1)
+        local title_count
+        title_count=$(hb_scan_long_titles "$dvd_inner" | wc -l)
+        log "Levy ${disc_num} ripattuna (${title_count} titletä)."
 
-        log "Levy ${disc_num} ripattuna (${title_count} titletä). Levy ejectattu."
+        eject "$disc_dev" 2>/dev/null || true
 
         # Päivitä jaksonumero seuraavaa levyä varten
         if [[ "$p_type" == series ]] && (( title_count > 0 )); then
