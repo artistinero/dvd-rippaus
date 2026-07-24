@@ -5,6 +5,7 @@ export TZ="Europe/Helsinki"
 
 # Käynnistä automaattisesti tmux-sessiossa
 _SESSION="dvd-rip"
+[[ "${1:-}" == "--encode-only" ]] && _SESSION="dvd-encode"
 if [[ -z "${TMUX:-}" ]]; then
     if tmux has-session -t "$_SESSION" 2>/dev/null; then
         echo "Sessio '$_SESSION' on jo käynnissä — liitytään."
@@ -436,6 +437,19 @@ encode_session() {
 # ── Pääohjelma ────────────────────────────────────────────────────────────────
 
 main() {
+    if [[ "${1:-}" == "--encode-only" ]]; then
+        local enc_dir="${2:-}"
+        [[ -z "$enc_dir" ]] && die "--encode-only vaatii session-hakemiston polun"
+        [[ -d "$enc_dir" ]]  || die "Hakemisto ei löydy: $enc_dir"
+        mountpoint -q /mnt/terastation/dlna \
+            || die "Terastation ei ole mountattu — tarkista verkkoasema"
+        command -v HandBrakeCLI &>/dev/null || die "HandBrakeCLI ei löydy"
+        log "═══ Enkoodaus-only: ${enc_dir##*/} ═══"
+        encode_session "$enc_dir"
+        log "═══ Kaikki valmis! ═══"
+        return
+    fi
+
     mkdir -p "$OUTBASE"
     log "═══ DVD-rippaus käynnistyy ═══"
 
