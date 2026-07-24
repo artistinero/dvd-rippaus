@@ -288,6 +288,7 @@ encode_session() {
         season=$(grep  '^SEASON='   "$mf" | cut -d= -f2-)
         ep=$(grep      '^START_EP=' "$mf" | cut -d= -f2-)
         rip_mode=$(grep '^RIP_MODE=' "$mf" | cut -d= -f2 || echo "makemkv")
+        local expected_count; expected_count=$(grep '^TITLE_COUNT=' "$mf" 2>/dev/null | cut -d= -f2 || echo "")
         local dest; dest=$(dest_path "$type" "$name" "$season")
 
         if [[ "$rip_mode" == "dvdbackup" ]]; then
@@ -297,6 +298,9 @@ encode_session() {
             local titles=()
             while IFS= read -r t; do titles+=("$t"); done < <(hb_scan_long_titles "$dvd_dir")
             (( ${#titles[@]} == 0 )) && { log "VAROITUS: ei raitoja — ${raw_dir##*/}"; continue; }
+            if [[ -n "$expected_count" ]] && (( ${#titles[@]} != expected_count )); then
+                log "VAROITUS: odotettiin ${expected_count} raitaa, löytyi ${#titles[@]} — ${raw_dir##*/}"
+            fi
             local i=1 total=${#titles[@]}
             for t in "${titles[@]}"; do
                 local out_name
@@ -349,17 +353,9 @@ encode_session() {
     local enc_dir="${session_dir}/encoded"
     mkdir -p "$enc_dir"
 
-    local prev_src="" prev_mode=""
     while IFS=$'\x1f' read -r mode src out_name dest title_num disc_label disc_n; do
         (( done_n++ )) || true
         local remaining=$(( total_titles - done_n + 1 ))
-
-        # ── Siivoa edellisen levyn lähde kun siirrytään uuteen ───────────────
-        if [[ "$prev_mode" == "dvdbackup" && -n "$prev_src" && "$src" != "$prev_src" ]]; then
-            rm -rf "$prev_src"
-            log "  Siivottu lähde: ${prev_src##*/}"
-        fi
-        prev_src="$src"; prev_mode="$mode"
 
         # ── Palautuminen: ohita jos jo terastationilla (>100MB) ──────────────
         if [[ -f "${dest}/${out_name}" ]] && \
@@ -409,11 +405,25 @@ encode_session() {
 
     done < "$queue"
 
-    # Siivoa viimeisen levyn lähde
-    if [[ "$prev_mode" == "dvdbackup" && -n "$prev_src" && -d "$prev_src" ]]; then
-        rm -rf "$prev_src"
-        log "  Siivottu lähde: ${prev_src##*/}"
-    fi
+    # Siivoa dvdbackup-lähteet vasta kun kaikki raidat on varmistettu terastationilla
+    local -A _src_ok
+    local _m _src _out _dest _t _l _n
+    while IFS=$'\x1f' read -r _m _src _out _dest _t _l _n; do
+        [[ "$_m" != "dvdbackup" ]] && continue
+        [[ -z "${_src_ok[$_src]+x}" ]] && _src_ok["$_src"]="yes"
+        if ! [[ -f "${_dest}/${_out}" ]] || \
+           (( $(stat -c%s "${_dest}/${_out}" 2>/dev/null || echo 0) <= 104857600 )); then
+            _src_ok["$_src"]="no"
+        fi
+    done < "$queue"
+    for _src in "${!_src_ok[@]}"; do
+        if [[ "${_src_ok[$_src]}" == "yes" && -d "$_src" ]]; then
+            rm -rf "$_src"
+            log "  Siivottu lähde: ${_src##*/}"
+        elif [[ "${_src_ok[$_src]}" == "no" ]]; then
+            log "  VAROITUS: lähde säilytetään — raita(oja) puuttuu terastationilta: ${_src##*/}"
+        fi
+    done
 
     local total_secs=$(( $(date +%s) - session_start ))
     local hb; hb=$(pgrep -x HandBrakeCLI 2>/dev/null || true)
@@ -552,6 +562,7 @@ for u, d in [('G', 1024**3), ('M', 1024**2)]:
         local title_count
         title_count=$(hb_scan_long_titles "$dvd_inner" | wc -l)
         log "Levy ${disc_num} ripattuna (${title_count} raitaa)."
+        echo "TITLE_COUNT=${title_count}" >> "${raw_dir}/meta.conf"
 
         eject "$disc_dev" 2>/dev/null || true
 
