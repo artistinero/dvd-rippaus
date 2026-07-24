@@ -504,11 +504,30 @@ main() {
         local dv_dir="${raw_dir}/dvdbackup"
         mkdir -p "$dv_dir"
 
+        # Levyn kokonaiskoko edistymispalkia varten
+        local disc_total_hr=""
+        disc_total_hr=$(python3 -c "
+import subprocess, sys
+try:
+    b = int(subprocess.check_output(['isosize', sys.argv[1]], stderr=subprocess.DEVNULL))
+except Exception:
+    try:
+        b = int(subprocess.check_output(['blockdev','--getsize64',sys.argv[1]], stderr=subprocess.DEVNULL))
+    except Exception:
+        sys.exit(0)
+for u, d in [('G', 1024**3), ('M', 1024**2)]:
+    if b >= d: print(f'{b/d:.1f}{u}'); break
+" "$disc_dev" 2>/dev/null || true)
+
         # Taustaprosessi näyttää edistymisen 10s välein
         ( while true; do
             sleep 10
             local sz; sz=$(du -sh "$dv_dir" 2>/dev/null | cut -f1)
-            printf '\r  [rippaus] %s kopioitu...' "$sz" >&2
+            if [[ -n "$disc_total_hr" ]]; then
+                printf '\r  [rippaus] %s / %s kopioitu...' "$sz" "$disc_total_hr" >&2
+            else
+                printf '\r  [rippaus] %s kopioitu...' "$sz" >&2
+            fi
           done ) &
         local progress_pid=$!
 
