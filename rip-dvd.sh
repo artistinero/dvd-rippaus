@@ -507,12 +507,8 @@ main() {
             esac
 
             local ok=""
-            read -rp "  Oikein? (k/e=korjaa/q=peruuta): " ok
-            case "${ok,,}" in
-                e) continue ;;
-                q) p_name=""; break ;;
-                *) break ;;
-            esac
+            read -rp "  Oikein? (k/e=korjaa): " ok
+            [[ "${ok,,}" == "e" ]] && continue || break
         done
         [[ -z "$p_name" ]] && continue
 
