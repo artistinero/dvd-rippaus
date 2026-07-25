@@ -1,13 +1,32 @@
 #!/bin/bash
 # rip-dvd.sh — Interaktiivinen DVD-rippaus ja enkoodaus
+#
+# Käyttö:
+#   rip-dvd.sh                          Normaali rippaus + enkoodaus
+#   rip-dvd.sh --encode-only <hakemisto> Enkoodaa olemassaoleva sessio uudelleen
+#
+# Vaatii: dvdbackup, HandBrakeCLI, lm-sensors, python3, flock (util-linux)
+
+# -u  : viittaus asettamattomaan muuttujaan on virhe
+# -o pipefail : putken viimeisin epäonnistumiskoodi näkyy — ei piilostu automaattisesti
+# (ei -e koska monet komennot saavat palauttaa virheitä tarkoituksella, esim. pgrep)
 set -uo pipefail
 export TZ="Europe/Helsinki"
 
-# Käynnistä automaattisesti tmux-sessiossa
+# ── Tmux-autostart ─────────────────────���──────────────────────────────────────
+# Skripti vaatii tmux-session jotta prosessi jää eloon kun SSH-yhteys katkeaa.
+# Jos tmux ei ole päällä, skripti käynnistää itsensä uudelleen tmux-session sisällä.
 _SESSION="dvd-rip"
 [[ "${1:-}" == "--encode-only" ]] && _SESSION="dvd-encode"
 if [[ -z "${TMUX:-}" ]]; then
     if tmux has-session -t "$_SESSION" 2>/dev/null; then
+        # --encode-only-argumentit häviäisivät jos liityttäisiin olemassaolevaan sessioon
+        if [[ "${1:-}" == "--encode-only" ]]; then
+            echo "VIRHE: Sessio '$_SESSION' on jo käynnissä — --encode-only-argumentit häviäisivät."
+            echo "Liity olemassaolevaan: tmux attach -t $_SESSION"
+            echo "Tai tarkista: tmux ls"
+            exit 1
+        fi
         echo "Sessio '$_SESSION' on jo käynnissä — liitytään."
         exec tmux attach -t "$_SESSION"
     else
@@ -15,18 +34,37 @@ if [[ -z "${TMUX:-}" ]]; then
     fi
 fi
 
-OUTBASE="/home/keitsi/dvd-rip-tmp"
-DEST_ROOT="/mnt/terastation/dlna/vids"
-LOGFILE="/home/keitsi/rip-dvd.log"
+# ── Globaalit muuttujat ───────────────────��───────────────────────────────────
+OUTBASE="/home/keitsi/dvd-rip-tmp"          # Rippauksen väliaikaiset tiedostot
+DEST_ROOT="/mnt/terastation/dlna/vids"       # Kohdehakemisto terastationilla
+LOGFILE="/home/keitsi/rip-dvd.log"           # Lokitiedosto (liitetään, ei ylikirjoiteta)
+
+# Lämpötilavalvonta (yksikkö: °C)
+# TEMP_WARN:   HandBrakeCLI pysäytetään (SIGSTOP) kun tämä ylittyy
+# TEMP_RESUME: HandBrakeCLI jatkaa (SIGCONT) kun lämpö on laskenut tähän
+# TEMP_KILL:   HandBrakeCLI tapetaan välittömästi (SIGKILL) — CPU lähellä kriittistä 100°C
+# Hystereeesi WARN→RESUME (85→50=35°C) estää nopean on/off-sykloinnin.
 TEMP_WARN=85
 TEMP_RESUME=50
-MIN_DURATION=60  # sekuntia — lyhyemmät raidat ohitetaan
+TEMP_KILL=95
 
-# ── Apufunktiot ───────────────────────────────────────────────────────────────
+# Raidat alle tämän keston (sekunteina) ohitetaan enkoodauksessa.
+# Tarkoitus: poistaa DVD:n menu-videot ja muut lyhyet "otsikot" jonosta.
+MIN_DURATION=60
+
+# Lukitustiedosto: varmistaa että vain yksi encode_session pyörii kerrallaan.
+# flock-pohjainen lukitus on atominen ytimen tasolla — pgrep-tarkistus ei ole.
+ENCODE_LOCKFILE="/tmp/rip-dvd-encode.lock"
+
+# ── Apufunktiot ───────────────────────���───────────────────────────────────────
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOGFILE"; }
 die() { log "VIRHE: $*"; exit 1; }
 
+# Palauttaa kaikkien lämpötila-antureiden maksimilukeman celsiusasteina.
+# Jos sensors ei ole asennettu tai epäonnistuu, palauttaa 0 (= ei throttlausta).
+# Käyttää sensors -j (JSON-muoto) ja käy rekursiivisesti läpi kaikki avain-arvoparit
+# joiden avain alkaa "temp" ja loppuu "_input" — nämä ovat anturien nykyarvot.
 get_temp() {
     command -v sensors &>/dev/null || { echo 0; return; }
     sensors -j 2>/dev/null | python3 -c "
@@ -43,32 +81,98 @@ def w(o):
 w(data); print(int(max(t)) if t else 0)"
 }
 
+# Taustaprosessi joka valvoo CPU-lämpötilaa enkoodauksen aikana.
+# Pysäyttää HandBrakeCLI:n (SIGSTOP) kun lämpö ylittää TEMP_WARN.
+# Jatkaa (SIGCONT) kun lämpö on laskenut TEMP_RESUME:n alle.
+# Tappaa (SIGKILL) jos lämpö ylittää TEMP_KILL — tämä on viimeinen keino ennen
+# CPU:n omaa suojasammutusta 100°C:ssa.
+#
+# KRIITTINEN HUOMIO: käyttää mapfile-taulukkoa pgrep:n tulokselle koska
+# HandBrakeCLI saattaa pyöriä useampana prosessina. kill "$pid" ei toimi
+# kun $pid sisältää useita rivejä — se epäonnistuu hiljaa. kill "${pids[@]}" toimii.
 throttle_loop() {
     local paused=0
     while true; do
-        sleep 20
-        local hb_pid temp
-        hb_pid=$(pgrep -x HandBrakeCLI 2>/dev/null || true)
+        sleep 10  # Tarkistusväli: 10s on riittävän nopea reagoimaan lämpöpiikkeihin
+        local -a hb_pids
+        mapfile -t hb_pids < <(pgrep -x HandBrakeCLI 2>/dev/null)
+        local temp
         temp=$(get_temp)
-        [[ -z "$hb_pid" ]] && { paused=0; continue; }
-        if (( temp >= TEMP_WARN )) && (( paused == 0 )); then
-            kill -STOP "$hb_pid" 2>/dev/null; paused=1
-            log "  Throttle: paussi ${temp}°C"
+
+        # Ei HandBrakeCLI-prosesseja — nollaa paussi-tila ja odota
+        if (( ${#hb_pids[@]} == 0 )); then
+            paused=0
+            continue
+        fi
+
+        if (( temp >= TEMP_KILL )); then
+            # Hätätilanne: lämpö kriittisen lähellä, tapa kaikki HandBrakeCLI-prosessit
+            # SIGKILL ei voi olla estettynä eikä sitä voi sivuuttaa — prosessi kuolee välittömästi.
+            # Tämä on parempi kuin koneen sammuminen ylikuumenemiseen.
+            kill -KILL "${hb_pids[@]}" 2>/dev/null || true
+            log "  HÄTÄSAMMUTUS: ${temp}°C ylittää TEMP_KILL=${TEMP_KILL}°C — HandBrakeCLI tapettu!"
+            paused=0
+        elif (( temp >= TEMP_WARN )) && (( paused == 0 )); then
+            # Pysäytä kaikki HandBrakeCLI-prosessit — SIGSTOP ei voi olla estettynä
+            kill -STOP "${hb_pids[@]}" 2>/dev/null || true
+            paused=1
+            log "  Throttle: paussi ${temp}°C (raja: ${TEMP_WARN}°C)"
         elif (( temp <= TEMP_RESUME )) && (( paused == 1 )); then
-            kill -CONT "$hb_pid" 2>/dev/null; paused=0
-            log "  Throttle: jatkuu ${temp}°C"
+            # Jatka kaikki pysäytetyt HandBrakeCLI-prosessit
+            kill -CONT "${hb_pids[@]}" 2>/dev/null || true
+            paused=0
+            log "  Throttle: jatkuu ${temp}°C (raja: ${TEMP_RESUME}°C)"
         fi
     done
 }
 
+# Muotoilee sekunnit ihmisluettavaan muotoon: "2h 35min" tai "47min"
 fmt_time() {
     local s=$1
     local h=$(( s/3600 )) m=$(( (s%3600)/60 ))
     (( h > 0 )) && printf '%dh %dmin' "$h" "$m" || printf '%dmin' "$m"
 }
 
+# Varmistaa terastationin saatavuuden — yrittää mountata jos ei ole mountattu.
+# Palauttaa 0 jos onnistui, 1 jos kaikki yritykset epäonnistuivat.
+# Kutsuja päättää onko epäonnistuminen kohtalokas (die) vai ohitettava (continue/log).
+ensure_terastation() {
+    local mountpt="/mnt/terastation/dlna"
+    mountpoint -q "$mountpt" && return 0
+    local tries=5 try
+    for (( try=1; try<=tries; try++ )); do
+        log "Terastation ei mountattu — yritetään ($try/$tries)..."
+        mount /mnt/terastation 2>/dev/null \
+            || mount "$mountpt"  2>/dev/null \
+            || true
+        sleep 10
+        mountpoint -q "$mountpt" && return 0
+    done
+    log "VIRHE: terastation ei saatu mountattua ${tries} yrityksellä"
+    return 1
+}
+
+# Ajaa HandBrakeCLI:n ja näyttää reaaliaikaisen edistymisprosentin.
+# Parametrit:
+#   $1 = lähde (dvdbackup-hakemisto tai MKV-tiedosto)
+#   $2 = kohdetiedosto (.mkv)
+#   $3 = otsikkonumero (tyhjä = automaattinen valinta)
+#   $4 = tunniste edistymispalkkia varten (esim. "S03E01")
+#
+# Enkoodausasetukset:
+#   x265 CRF 21  — hyvä laatu, kohtuullinen tiedostokoko
+#   --all-audio copy  — kopioi kaikki ääniraidat sellaisenaan (ei transkooda)
+#   --audio-fallback aac  — jos kopiointi ei onnistu, käytä AAC
+#   --all-subtitles  — kopioi kaikki tekstitysraidat
+#   --comb-detect --decomb  — älykkäs lomituksen poisto DVD-materiaalille
+#   --loose-anamorphic --crop-mode auto  — säilyttää DVD:n kuvasuhteen oikein
+#   </dev/null  — KRIITTINEN: estää HandBrakeCLI:tä lukemasta while-silmukan stdinistä
+#                 (bash-bugi: silmukan sisällä ajetut ohjelmat perivät silmukan fd 0:n)
+#
+# Paluuarvo: HandBrakeCLI:n exit-koodi (PIPESTATUS[0]).
+# Python3-prosessi lukee HandBrakeCLI:n stdout/stderr ja kirjoittaa lokiin.
+# Jos python3 kaatuu, HandBrakeCLI saa SIGPIPE ja sen exit-koodi on epänolla.
 run_hb() {
-    # $1=input $2=output [$3=title number] [$4=label for progress e.g. "S03E01"]
     local title_arg=()
     [[ -n "${3:-}" ]] && title_arg=(--title "$3")
     local label="${4:-}"
@@ -80,7 +184,7 @@ run_hb() {
         --all-audio --aencoder copy --audio-fallback aac \
         --all-subtitles --markers \
         </dev/null 2>&1 | python3 -c '
-import sys, re, time
+import sys, re
 label = sys.argv[2] if len(sys.argv) > 2 else ""
 last_pct = -5
 buf = b""
@@ -89,11 +193,13 @@ with open(sys.argv[1], "a") as lf:
     while True:
         ch = stdin_b.read(1)
         if not ch:
+            # EOF: tyhjennä mahdollinen viimeinen rivi ilman rivinvaihtoa
             if buf:
                 line = buf.decode("utf-8", errors="replace")
                 sys.stdout.write(line + "\n"); lf.write(line + "\n")
             break
         if ch == b"\r":
+            # HandBrake käyttää \r edistymisrivillä — näytä terminaalissa, kirjoita lokiin 5% välein
             line = buf.decode("utf-8", errors="replace")
             sys.stdout.write("\r  " + line.strip()); sys.stdout.flush()
             m = re.search(r"(\d+\.\d+) %.*ETA\s+(\S+)", line)
@@ -106,47 +212,39 @@ with open(sys.argv[1], "a") as lf:
                     lf.write(msg + "\n"); lf.flush()
             buf = b""
         elif ch == b"\n":
+            # Normaali rivi — kirjoita lokiin (suodata pois tyhjät ja varoitukset)
             line = buf.decode("utf-8", errors="replace")
-            if "warning" not in line.lower() and line.strip():
+            if line.strip():
                 sys.stdout.write("\n" + line); sys.stdout.flush()
                 lf.write(line); lf.flush()
             buf = b""
         else:
             buf += ch
 ' "$LOGFILE" "$label"
+    # PIPESTATUS[0] = HandBrakeCLI exit-koodi, [1] = python3 exit-koodi.
+    # Palautetaan HandBrakeCLI:n koodi koska se kertoo enkoodauksen onnistumisesta.
     return "${PIPESTATUS[0]}"
 }
 
+# Odottaa kunnes /dev/sr1-asemassa on luettava levy.
+# Käyttää dd:tä koska se on luotettavin tapa testata levyn luettavuus —
+# toimii myös CSS-salatuilla levyillä (libdvdcss2 purkaa lennossa).
+# Aseman osoite on kovakoodattu /dev/sr1 koska brainbinissä on kaksi asemaa
+# ja FREECOM DVD+/-RW on aina sr1 (sr0 on sisäinen, ei käytetä).
 wait_for_disc() {
-    # Returns "0 /dev/srN" when a readable disc is detected
     local dev="/dev/sr1"
     while ! dd if="$dev" count=1 bs=2048 of=/dev/null status=none 2>/dev/null; do
         sleep 10
     done
-    echo "0 $dev"
+    echo "$dev"
 }
 
-sorted_titles() {
-    find "$1" -maxdepth 1 -name "*_t*.mkv" -printf '%f\t%p\n' | python3 -c "
-import sys, re
-files = []
-for line in sys.stdin:
-    parts = line.strip().split('\t', 1)
-    if len(parts) != 2: continue
-    m = re.search(r'_t(\d+)\.mkv$', parts[0])
-    files.append((int(m.group(1)) if m else 999, parts[1]))
-files.sort()
-print('\n'.join(p for _, p in files))"
-}
-
-title_dur() {
-    mediainfo --Inform="Video;%Duration%" "$1" 2>/dev/null | python3 -c "
-import sys; v=sys.stdin.read().strip()
-print(int(float(v)/1000) if v else 0)" 2>/dev/null || echo 0
-}
-
+# Skannaa DVD-hakemiston ja tulostaa niiden otsikoiden (title) numerot
+# joiden kesto on vähintään MIN_DURATION sekuntia.
+# Käytetään sekä rippausvaiheessa (TITLE_COUNT:n laskemiseen meta.conf:iin)
+# että enkoodausvaiheen jonon rakentamisessa.
+# HandBrake-skannaus kestää yleensä 5–15 sekuntia per levy.
 hb_scan_long_titles() {
-    # Scan DVD directory and print title numbers that are >= MIN_DURATION seconds
     local dvd_dir="$1"
     HandBrakeCLI -i "$dvd_dir" -t 0 --scan </dev/null 2>&1 | python3 -c "
 import sys, re
@@ -167,6 +265,14 @@ for line in sys.stdin.buffer:
 "
 }
 
+# Rakentaa kohdepolun tiedostotyypistä riippuen.
+# Terastationin hakemistorakenne:
+#   series/       → Sarjat kausikohtaisiin kansioihin (Jellyfin tunnistaa automaattisesti)
+#   movies/       → Elokuvat (nimi + vuosi)
+#   documentaries/→ Dokumentit (nimi + vuosi)
+#   Music videos/ → Musiikkivideot ja konsertit (nimi ilman vuotta)
+#   misc/         → Muu materiaali
+# Huom: "Music videos" isolla M:llä ja välilyönnillä — terastationilla olemassaoleva kansio.
 dest_path() {
     local type="$1" name="$2" val="$3"
     case "$type" in
@@ -178,12 +284,32 @@ dest_path() {
     esac
 }
 
-# ── Interaktiivinen kysely per levy ───────────────────────────────────────────
+# Korvaa tiedostojärjestelmissä kiellettyjä merkkejä viivalla.
+# / on kriittisin (rikkoo polurakenteen), mutta SMB-levyllä myös muut merkit ovat kiellettyjä.
+sanitize_name() {
+    local n="$1"
+    n="${n//\//-}"
+    n="${n//\\/-}"
+    n="${n//:/-}"
+    n="${n//\*/-}"
+    n="${n//\?/-}"
+    n="${n//\"/-}"
+    n="${n//</-}"
+    n="${n//>/-}"
+    n="${n//|/-}"
+    printf '%s' "$n"
+}
 
+# ── Interaktiivinen metatietokysely per levy ──────────────────��───────────────
+# Kysyy levyn tiedot (tyyppi, nimi, kausi/vuosi, jaksonumero) interaktiivisesti.
+# Edellisen levyn arvot tarjotaan oletuksina hakasulkeissa.
+# Palauttaa tuloksen \x1F-eroteltuna merkkijonona (ASCII unit separator).
+# \x1F valittiin koska se ei esiinny laillisissa tiedostonimissä.
 ask_meta() {
     local p_type="${1:-}" p_name="${2:-}" p_season="${3:-}" p_ep="${4:-}"
     echo "" >&2
 
+    # Tyyppivalidointi silmukalla — hyväksyy vain tunnetut arvot
     local prompt="Tyyppi (series/movie/doc/music/misc)"
     [[ -n "$p_type" ]] && prompt+=" [$p_type]"
     local type=""
@@ -207,8 +333,10 @@ ask_meta() {
         local sp="Kausi"
         [[ -n "$p_season" && "$p_type" == series ]] && sp+=" [$p_season]"
         read -rp "${sp}: " val; val="${val:-$p_season}"
+        [[ "$val" =~ ^[0-9]+$ ]] || { echo "  Kausiluku ei kelpaa: '$val'" >&2; return 1; }
 
-        # Ehdota seuraavaa jaksoa: ensin session-laskuri, sitten terastation
+        # Ehdota seuraavaa jaksoa: jos kausi vaihtui, katso terastationilta viimeisin jakso.
+        # Jos sama kausi kuin edellinen levy, käytä session-laskurin arvoa (p_ep).
         local suggest=1
         if [[ -n "$p_ep" && "$p_type" == series && "$p_season" == "$val" ]]; then
             suggest="$p_ep"
@@ -226,6 +354,7 @@ print(max(n)+1 if n else 1)" 2>/dev/null || echo 1)
         fi
         read -rp "Ensimmäinen jakso tällä levyllä [$suggest]: " ep
         ep="${ep:-$suggest}"
+        [[ "$ep" =~ ^[0-9]+$ ]] || { echo "  Jaksonumero ei kelpaa: '$ep'" >&2; return 1; }
         ;;
 
     movie|doc)
@@ -234,6 +363,7 @@ print(max(n)+1 if n else 1)" 2>/dev/null || echo 1)
         read -rp "${lbl}: " name; name="${name:-$p_name}"
         [[ -z "$name" ]] && { echo "  Nimi ei voi olla tyhjä." >&2; return 1; }
         read -rp "Vuosi: " val
+        [[ "$val" =~ ^[0-9]{4}$ ]] || { echo "  Vuosi ei kelpaa (4 numeroa, esim. 1977): '$val'" >&2; return 1; }
         ep=""
         ;;
 
@@ -252,86 +382,118 @@ print(max(n)+1 if n else 1)" 2>/dev/null || echo 1)
         ;;
     esac
 
-    # Käytä \x1F (ASCII unit separator) erottimena — ei esiinny nimissä
+    name=$(sanitize_name "$name")
+    [[ -z "$name" ]] && { echo "  Nimi tyhjeni sanitoinnin jälkeen — tarkista erikoismerkit" >&2; return 1; }
     printf '%s\x1f%s\x1f%s\x1f%s' "$type" "$name" "$val" "$ep"
 }
 
-# ── Enkoodausvaihe ────────────────────────────────────────────────────────────
-
+# ── Enkoodausvaihe ───────────────────────���──────────────────────────��─────────
+# Skannaa kaikki session-hakemiston levyt, rakentaa enkoodausjonon ja ajaa
+# HandBrakeCLI:n jokaiselle raidalle.
+# Siirtää valmiit tiedostot terastationille ja poistaa dvdbackup-lähteet
+# VASTA kun kaikki raidat on varmistettu terastationilla (palautumisturva).
 encode_session() {
     local session_dir="$1"
 
-    if pgrep -x HandBrakeCLI >/dev/null 2>&1; then
-        log "HandBrake käynnissä muualla — odotetaan..."
-        while pgrep -x HandBrakeCLI >/dev/null 2>&1; do sleep 30; done
-        log "Edellinen enkoodaus valmis."
+    # ── Yksittäisyyslukko ───���─────────────────────────────────────────────────
+    # flock on atominen ytimen tasolla — pgrep-tarkistus ei ole.
+    # Vanha pgrep-tarkistus epäonnistui kilpaehdon (race condition) takia:
+    # molemmat sessiot saattoivat tarkistaa yhtä aikaa lyhyen välin aikana
+    # jolloin HandBrakeCLI ei ollut käynnissä (siirtymä raidan vaihdossa).
+    # Tulos: kaksi HandBrakeCLI-instanssia yhtä aikaa → CPU 100°C.
+    exec 9>"$ENCODE_LOCKFILE"
+    if ! flock -n 9; then
+        die "Enkoodaus on jo käynnissä toisessa sessiossa (lukko: $ENCODE_LOCKFILE). Odota tai tarkista tmux ls."
     fi
+    # fd 9 pysyy auki koko encode_session:n ajan. Lukko vapautuu automaattisesti
+    # kun skripti päättyy (normaalisti tai virheeseen) koska fd sulkeutuu.
+
     log "═══ Enkoodausvaihe alkaa ═══"
 
+    # ── Levytilan tarkistus enkoodauksen alussa ──────────��────────────────────
+    # Enkoodaus voi kestää tunteja — varmista ennen aloitusta että tilaa riittää.
+    # df antaa väärän tuloksen jos terastation ei ole mountattu — varmista ensin.
+    ensure_terastation || die "Terastation ei saatu mountattua enkoodauksen alussa"
+    local local_gb tera_gb
+    local_gb=$(df "$OUTBASE" | awk 'NR==2 {printf "%d", $4/1024/1024}')
+    tera_gb=$(df "$DEST_ROOT" | awk 'NR==2 {printf "%d", $4/1024/1024}')
+    log "Tilaa: brainbin ${local_gb} GB vapaana, terastation ${tera_gb} GB vapaana"
+    (( tera_gb < 5 )) && die "Terastationilla kriittisen vähän tilaa (${tera_gb} GB) — pysäytetään"
+    (( tera_gb < 20 )) && log "VAROITUS: Terastationilla vain ${tera_gb} GB vapaana"
+
     # ── Esiskannaus: rakennetaan enkoodausjono tiedostoon ────────────────────
+    # Jono tallennetaan tiedostoon (ei putkeen) koska sitä luetaan useaan kertaan:
+    # 1) enkoodaussilmukassa, 2) lähdesiivousvaiheessa.
+    # Erotin: \x1F (ASCII unit separator) koska se ei esiinny tiedostonimissä.
+    # Kentät: dvd_dir|out_name|dest|title_num|disc_label|disc_seq
     local queue="${session_dir}/.queue"
     > "$queue"
     log "Skannataan levyt..."
     local disc_seq=1
+
     while IFS= read -r mf; do
         local raw_dir; raw_dir=$(dirname "$mf")
         local type name season ep rip_mode
+
+        # Lue metatiedot — grep+cut siksi koska tiedoston rakenne on yksinkertainen
+        # avain=arvo-muoto ilman lainausmerkkejä (ei turvallista sourcettavaksi)
         type=$(grep    '^TYPE='     "$mf" | cut -d= -f2-)
         name=$(grep    '^NAME='     "$mf" | cut -d= -f2-)
         season=$(grep  '^SEASON='   "$mf" | cut -d= -f2-)
         ep=$(grep      '^START_EP=' "$mf" | cut -d= -f2-)
-        rip_mode=$(grep '^RIP_MODE=' "$mf" | cut -d= -f2 || echo "makemkv")
+
+        # TITLE_COUNT tallennettiin rippausvaiheessa — vertailua varten
         local expected_count; expected_count=$(grep '^TITLE_COUNT=' "$mf" 2>/dev/null | cut -d= -f2 || echo "")
         local dest; dest=$(dest_path "$type" "$name" "$season")
 
-        if [[ "$rip_mode" == "dvdbackup" ]]; then
-            local dvd_dir
-            dvd_dir=$(find "${raw_dir}/dvdbackup" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)
-            [[ -z "$dvd_dir" ]] && { log "VIRHE: dvdbackup ei löydy — ${raw_dir##*/}"; continue; }
-            local read_errors_stored; read_errors_stored=$(grep '^READ_ERRORS=' "$mf" 2>/dev/null | cut -d= -f2 || echo "")
-            [[ -n "$read_errors_stored" ]] && log "!!! HUONO LEVY: ${read_errors_stored} lukuvirhettä rippauksen aikana — tarkista lopputulos: ${raw_dir##*/} !!!"
-            local titles=()
-            while IFS= read -r t; do titles+=("$t"); done < <(hb_scan_long_titles "$dvd_dir")
-            (( ${#titles[@]} == 0 )) && { log "VAROITUS: ei raitoja — ${raw_dir##*/}"; continue; }
-            if [[ -n "$expected_count" ]] && (( ${#titles[@]} != expected_count )); then
-                log "VAROITUS: odotettiin ${expected_count} raitaa, löytyi ${#titles[@]} — ${raw_dir##*/}"
-            fi
-            local i=1 total=${#titles[@]}
-            for t in "${titles[@]}"; do
-                local out_name
-                case "$type" in
-                series) out_name="${name} S$(printf '%02d' "$season")E$(printf '%02d' "$ep").mkv" ;;
-                *)  (( total==1 )) && out_name="${name}.mkv" \
-                                   || out_name="${name} - Part $(printf '%02d' "$i").mkv" ;;
-                esac
-                # format: mode|src|out_name|dest|title_num|disc_label|disc_seq
-                printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
-                    "dvdbackup" "$dvd_dir" "$out_name" "$dest" "$t" "${raw_dir##*/}" "$disc_seq" >> "$queue"
-                [[ "$type" == series ]] && (( ep++ )) || true
-                (( i++ )) || true
-            done
-        else
-            local filtered=()
-            while IFS= read -r f; do
-                [[ -f "$f" ]] || continue
-                local dur; dur=$(title_dur "$f")
-                (( dur >= MIN_DURATION )) && filtered+=("$f") || { log "  Ohitetaan: ${f##*/} (${dur}s)"; rm -f "$f"; }
-            done < <(sorted_titles "$raw_dir")
-            local i=1 total=${#filtered[@]}
-            for raw in "${filtered[@]}"; do
-                local out_name
-                case "$type" in
-                series) out_name="${name} S$(printf '%02d' "$season")E$(printf '%02d' "$ep").mkv" ;;
-                *)  (( total==1 )) && out_name="${name}.mkv" \
-                                   || out_name="${name} - Part $(printf '%02d' "$i").mkv" ;;
-                esac
-                printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
-                    "mkv" "$raw" "$out_name" "$dest" "" "${raw_dir##*/}" "$disc_seq" >> "$queue"
-                [[ "$type" == series ]] && (( ep++ )) || true
-                (( i++ )) || true
-            done
+        # Tarkista että dvdbackup-hakemisto on olemassa.
+        # Jos ei ole, levy on joko ripattu epäonnistuneesti tai tämä on tyhjä sessio.
+        local dvd_dir
+        dvd_dir=$(find "${raw_dir}/dvdbackup" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)
+        if [[ -z "$dvd_dir" ]]; then
+            log "VIRHE: dvdbackup-hakemisto ei löydy — ${raw_dir##*/} (ohitetaan)"
+            continue
         fi
+
+        # Varoita jos tällä levyllä oli lukuvirheitä rippausvaiheessa
+        local read_errors_stored; read_errors_stored=$(grep '^READ_ERRORS=' "$mf" 2>/dev/null | cut -d= -f2 || echo "")
+        [[ -n "$read_errors_stored" ]] && log "!!! HUONO LEVY: ${read_errors_stored} lukuvirhettä rippauksen aikana — tarkista lopputulos: ${raw_dir##*/} !!!"
+
+        # Skannaa pitkät raidat HandBrakella (>=MIN_DURATION sekuntia)
+        # Tämä on toinen skannaus — ensimmäinen tehtiin rippausvaiheessa TITLE_COUNT:lle.
+        # Uusi skannaus tehdään jotta saadaan tarkat raita-numerot enkoodausta varten.
+        local titles=()
+        while IFS= read -r t; do titles+=("$t"); done < <(hb_scan_long_titles "$dvd_dir")
+        (( ${#titles[@]} == 0 )) && { log "VAROITUS: ei enkoodattavia raitoja — ${raw_dir##*/}"; continue; }
+
+        # Vertaa skannauksen tulosta rippausvaiheessa tallennettuun arvoon
+        if [[ -n "$expected_count" ]] && (( ${#titles[@]} != expected_count )); then
+            log "VAROITUS: odotettiin ${expected_count} raitaa, löytyi ${#titles[@]} — ${raw_dir##*/}"
+        fi
+
+        # Rakenna jonorivi jokaiselle raidalle
+        local i=1 total=${#titles[@]}
+        for t in "${titles[@]}"; do
+            local out_name
+            case "$type" in
+            series)
+                # Sarjat: SxxExx-nimeäminen Jellyfin-automaatintunnistusta varten
+                out_name="${name} S$(printf '%02d' "$season")E$(printf '%02d' "$ep").mkv"
+                ;;
+            *)
+                # Muut: yksi tiedosto jos yksi raita, muuten "Part XX"
+                # Huom: doc/music-levyillä voi olla monta raitaa (haastattelut, bonukset)
+                (( total==1 )) && out_name="${name}.mkv" \
+                               || out_name="${name} - Part $(printf '%02d' "$i").mkv"
+                ;;
+            esac
+            printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+                "$dvd_dir" "$out_name" "$dest" "$t" "${raw_dir##*/}" "$disc_seq" >> "$queue"
+            [[ "$type" == series ]] && (( ep++ )) || true
+            (( i++ )) || true
+        done
         (( disc_seq++ )) || true
+
     done < <(find "$session_dir" -name "meta.conf" | sort)
 
     local total_titles; total_titles=$(wc -l < "$queue")
@@ -340,36 +502,75 @@ encode_session() {
     (( total_titles == 0 )) && { log "Ei enkoodattavaa."; return; }
 
     # ── Enkoodaussilmukka ─────────────────────────────────────────────────────
+
+    # Käynnistä lämpötilavalvonta taustalle
     throttle_loop &
     local tpid=$!
-    trap "kill $tpid 2>/dev/null; exit" INT TERM
+
+    # Siivoustoiminto jota kutsutaan sekä normaalissa poistumisessa että signaaleissa.
+    # KRIITTINEN: jos throttle_loop on pysäyttänyt HandBrakeCLI:n (SIGSTOP) ja
+    # skripti saa SIGINT/SIGTERM, HandBrakeCLI jäisi ikuisesti pysähtyneeksi ilman tätä.
+    # SIGCONT on lähetettävä ennen skriptin poistumista.
+    _encode_cleanup() {
+        local -a _hb
+        mapfile -t _hb < <(pgrep -x HandBrakeCLI 2>/dev/null)
+        (( ${#_hb[@]} > 0 )) && kill -CONT "${_hb[@]}" 2>/dev/null || true
+        kill "$tpid" 2>/dev/null || true
+        wait "$tpid" 2>/dev/null || true
+        trap - INT TERM
+    }
+    trap "_encode_cleanup; exit 1" INT TERM
 
     local done_n=0 session_start; session_start=$(date +%s)
     local enc_dir="${session_dir}/encoded"
     mkdir -p "$enc_dir"
 
-    while IFS=$'\x1f' read -r mode src out_name dest title_num disc_label disc_n; do
+    # Jonon muoto (6 kenttää, \x1F-erotettu):
+    # dvd_dir | out_name | dest | title_num | disc_label | disc_seq
+    while IFS=$'\x1f' read -r src out_name dest title_num disc_label disc_n; do
         (( done_n++ )) || true
-        local remaining=$(( total_titles - done_n + 1 ))
 
-        # ── Palautuminen: ohita jos jo terastationilla (>100MB) ──────────────
+        # ── Palautuminen ─────────────────────────────────────────────────────
+        ensure_terastation || log "  VAROITUS: terastation ei saatavilla tarkistushetkellä — jatketaan"
+
+        # Tarkistus 1: tiedosto on jo terastationilla — ohita
         if [[ -f "${dest}/${out_name}" ]] && \
            [[ $(stat -c%s "${dest}/${out_name}" 2>/dev/null || echo 0) -gt 1048576 ]]; then
             log "  Ohitetaan (jo valmis): ${out_name}"
             continue
         fi
-        # Siivoa mahdollinen aiempi keskeytynyt tiedosto
-        rm -f "${enc_dir}/${out_name}"
+
+        # Tarkistus 2: valmis tiedosto enc_dir:ssä edellisestä epäonnistuneesta siirrosta —
+        # yritetään siirtoa ennen uudelleenenkoodausta (säästää tunnin työn).
+        local _enc_out="${enc_dir}/${out_name}"
+        if [[ -f "$_enc_out" ]] && \
+           [[ $(stat -c%s "$_enc_out" 2>/dev/null || echo 0) -gt 1048576 ]]; then
+            log "  Löytyi enc_dir:stä edelliseltä yritykseltä — yritetään siirtoa"
+            mkdir -p "$dest" 2>/dev/null || true
+            if mv "$_enc_out" "${dest}/"; then
+                local _sz; _sz=$(du -sh "${dest}/${out_name}" 2>/dev/null | cut -f1 || echo "?")
+                log "  ✓ ${out_name} (${_sz}) [siirretty uudelleenyrityksestä]"
+                continue
+            fi
+            log "  Siirto epäonnistui edelleen — enkoodataan uudelleen"
+            rm -f "$_enc_out"
+        else
+            # Siivoa mahdollinen vajaa/vioittunut enc_dir-tiedosto
+            rm -f "${enc_dir}/${out_name}"
+        fi
 
         # ── Edistymisraportti ─────────────────────────────────────────────────
         echo "" >&2
         printf '  ╔══════════════════════════════════════════╗\n' >&2
-        printf '  ║  Levy %d / %d  |  Jakso %d / %d\n' "$disc_n" "$total_discs" "$done_n" "$total_titles" >&2
+        printf '  ║  Levy %d / %d  |  Raita %d / %d\n' "$disc_n" "$total_discs" "$done_n" "$total_titles" >&2
         printf '  ║  %s\n' "$out_name" >&2
         if (( done_n > 1 )); then
             local elapsed=$(( $(date +%s) - session_start ))
+            # Keskiarvo perustuu VALMISTUNEISIIN raitoihin (done_n-1).
+            # Ensimmäistä raitaa enkoodatessa ei näytetä ETAa koska näyte on liian pieni.
             local avg=$(( elapsed / (done_n - 1) ))
-            local eta_secs=$(( avg * (total_titles - done_n + 1) ))
+            local remaining=$(( total_titles - done_n + 1 ))
+            local eta_secs=$(( avg * remaining ))
             printf '  ║  Kokonais-ETA: ~%s  (%d jäljellä)\n' "$(fmt_time "$eta_secs")" "$remaining" >&2
         fi
         printf '  ╚══════════════════════════════════════════╝\n' >&2
@@ -378,34 +579,60 @@ encode_session() {
         # ── Enkoodaus ─────────────────────────────────────────────────────────
         local t_start; t_start=$(date +%s)
         local out="${enc_dir}/${out_name}"
-        mkdir -p "$dest"
 
-        if [[ "$mode" == "dvdbackup" ]]; then
-            run_hb "$src" "$out" "$title_num" "$out_name"
-        else
-            run_hb "$src" "$out" "" "$out_name"
+        # Luo kohdepolku terastationilla — retry jos verkko katkaisi
+        if ! mkdir -p "$dest"; then
+            log "  Kohdepolun luonti epäonnistui — yritetään remountata..."
+            ensure_terastation || { log "  VIRHE: terastation ei saatu mountattua — ohitetaan: ${out_name}"; continue; }
+            mkdir -p "$dest" || { log "  VIRHE: kohdepolun luonti epäonnistui yrityksistä huolimatta: ${dest}"; continue; }
         fi
+
+        # Odota viilentymistä ennen enkoodauksen aloitusta.
+        # Kriittistä SIGKILL-tilanteen jälkeen: ilman tätä seuraava raita käynnistyisi
+        # välittömästi vaikka CPU on edelleen ylikuumentunut.
+        local _pre_temp; _pre_temp=$(get_temp)
+        if (( _pre_temp > TEMP_RESUME )); then
+            log "  Odotetaan viilentymistä ennen seuraavaa raitaa (${_pre_temp}°C > ${TEMP_RESUME}°C)..."
+            while (( $(get_temp) > TEMP_RESUME )); do sleep 15; done
+            log "  Lämpö laskenut ($(get_temp)°C) — aloitetaan enkoodaus"
+        fi
+
+        run_hb "$src" "$out" "$title_num" "$out_name"
         local rc=$?
 
         local t_secs=$(( $(date +%s) - t_start ))
         if (( rc == 0 )) && [[ -s "$out" ]]; then
             local sz; sz=$(du -sh "$out" | cut -f1)
-            mv "$out" "${dest}/"
-            [[ "$mode" == "mkv" ]] && rm -f "$src"
-            log "  ✓ ${out_name} (${sz}, $(fmt_time "$t_secs"))"
+            # Siirrä terastationille — retry jos verkko katkaisi enkoodauksen aikana
+            if mv "$out" "${dest}/"; then
+                log "  ✓ ${out_name} (${sz}, $(fmt_time "$t_secs"))"
+            else
+                log "  Siirto epäonnistui — yritetään remountata..."
+                if ensure_terastation && mkdir -p "$dest" && mv "$out" "${dest}/"; then
+                    log "  ✓ ${out_name} (${sz}, $(fmt_time "$t_secs")) [siirto onnistui remountin jälkeen]"
+                else
+                    log "  VIRHE: siirto terastationille epäonnistui — ${out_name} jäi: ${out}"
+                    log "         Aja --encode-only kun terastation on taas saatavilla (tiedosto enkoodataan uudelleen)"
+                fi
+            fi
         else
             rm -f "$out"
-            log "  VIRHE: enkoodaus epäonnistui — ${out_name} ($(fmt_time "$t_secs"))"
+            log "  VIRHE: enkoodaus epäonnistui — ${out_name} (rc=${rc}, $(fmt_time "$t_secs"))"
         fi
 
     done < "$queue"
 
-    # Siivoa dvdbackup-lähteet vasta kun kaikki raidat on varmistettu terastationilla
+    # ── Lähdesiivous: poista dvdbackup-kansiot kun kaikki raidat varmennettu ─
+    # Lähteet poistetaan VASTA tässä (ei heti enkoodauksen jälkeen) jotta keskeytynyt
+    # enkoodaus voidaan aloittaa uudelleen --encode-only:lla ilman uudelleenrippaamista.
+    # Logiikka: jos KAIKKI levyn raidat löytyvät terastationilta (>1 MB), lähde poistetaan.
+    # Jos yksikin raita puuttuu, lähde säilytetään ja lokiin tulee varoitus.
     local -A _src_ok
-    local _m _src _out _dest _t _l _n
-    while IFS=$'\x1f' read -r _m _src _out _dest _t _l _n; do
-        [[ "$_m" != "dvdbackup" ]] && continue
+    local _src _out _dest _t _l _n
+    while IFS=$'\x1f' read -r _src _out _dest _t _l _n; do
+        # Alusta avain "yes" ensimmäisellä kohdauksella
         [[ -z "${_src_ok[$_src]+x}" ]] && _src_ok["$_src"]="yes"
+        # Jos raita puuttuu tai on liian pieni, merkitse lähde säilytettäväksi
         if ! [[ -f "${_dest}/${_out}" ]] || \
            (( $(stat -c%s "${_dest}/${_out}" 2>/dev/null || echo 0) <= 1048576 )); then
             _src_ok["$_src"]="no"
@@ -421,28 +648,28 @@ encode_session() {
     done
 
     local total_secs=$(( $(date +%s) - session_start ))
-    local hb; hb=$(pgrep -x HandBrakeCLI 2>/dev/null || true)
-    [[ -n "$hb" ]] && kill -CONT "$hb" 2>/dev/null || true
-    kill "$tpid" 2>/dev/null || true
-    trap - INT TERM
+    _encode_cleanup
     log "═══ Enkoodaus valmis — yhteensä $(fmt_time "$total_secs") ═══"
 
-    # Muistuta lukuvirhelevyistä
+    # Muistuta lukuvirhelevyistä session lopussa
     while IFS= read -r mf; do
         local errs; errs=$(grep '^READ_ERRORS=' "$mf" 2>/dev/null | cut -d= -f2 || echo "")
         [[ -n "$errs" ]] && log "!!! TARKISTA LOPPUTULOS: $(grep '^NAME=' "$mf" | cut -d= -f2-) — ${errs} lukuvirhettä rippauksen aikana !!!"
     done < <(find "$session_dir" -name "meta.conf" | sort)
 }
 
-# ── Pääohjelma ────────────────────────────────────────────────────────────────
+# ── Pääohjelma ──────────��─────────────────────────────────────────────────────
 
 main() {
+    # --encode-only: ohita rippausvaihe, enkoodaa olemassaoleva session-hakemisto.
+    # Hyödyllinen palautumiseen: jos enkoodaus katkesi (virta, ylikuumeneminen),
+    # aloita enkoodaus uudelleen ilman uudelleenrippaamista.
+    # Palautumislogiikka (encode_session) ohittaa raidat jotka ovat jo terastationilla.
     if [[ "${1:-}" == "--encode-only" ]]; then
         local enc_dir="${2:-}"
         [[ -z "$enc_dir" ]] && die "--encode-only vaatii session-hakemiston polun"
         [[ -d "$enc_dir" ]]  || die "Hakemisto ei löydy: $enc_dir"
-        mountpoint -q /mnt/terastation/dlna \
-            || die "Terastation ei ole mountattu — tarkista verkkoasema"
+        ensure_terastation || die "Terastation ei saatu mountattua"
         command -v HandBrakeCLI &>/dev/null || die "HandBrakeCLI ei löydy"
         log "═══ Enkoodaus-only: ${enc_dir##*/} ═══"
         encode_session "$enc_dir"
@@ -453,48 +680,48 @@ main() {
     mkdir -p "$OUTBASE"
     log "═══ DVD-rippaus käynnistyy ═══"
 
-    mountpoint -q /mnt/terastation/dlna \
-        || die "Terastation ei ole mountattu — tarkista verkkoasema"
+    # Varmista riippuvuudet ennen kuin käyttäjä syöttää levyjä
+    ensure_terastation || die "Terastation ei saatu mountattua"
     command -v HandBrakeCLI &>/dev/null || die "HandBrakeCLI ei löydy"
-    command -v mediainfo   &>/dev/null || die "mediainfo ei löydy"
     command -v dvdbackup   &>/dev/null || die "dvdbackup ei löydy — asenna: apt install dvdbackup"
 
-    check_space() {
-        local local_gb tera_gb
-        local_gb=$(df "$OUTBASE" | awk 'NR==2 {printf "%d", $4/1024/1024}')
-        tera_gb=$(df "$DEST_ROOT" | awk 'NR==2 {printf "%d", $4/1024/1024}')
-        log "Tilaa: brainbin ${local_gb} GB vapaana, terastation ${tera_gb} GB vapaana"
-        # Yksi levy vie ~7GB rippaus + enkoodauksen väliaikaiset tiedostot.
-        # Varoitus jos tilaa alle 2 levylle (14GB), pysäytys jos alle 1 levylle (8GB).
-        (( local_gb < 14 )) && log "VAROITUS: Brainbinillä vain ${local_gb} GB — tilaa ehkä vain yhdelle levylle"
-        (( local_gb <  8 )) && die "Brainbinillä ei riitä tilaa seuraavalle levylle (${local_gb} GB) — pysäytetään"
-        # Terastationilla enkoodattu jakso ~600MB, varoitus alle 20GB, pysäytys alle 5GB
-        (( tera_gb  < 20 )) && log "VAROITUS: Terastationilla vain ${tera_gb} GB — enkoodaus voi epäonnistua"
-        (( tera_gb  <  5 )) && die "Terastationilla kriittisen vähän tilaa (${tera_gb} GB) — pysäytetään"
-    }
+    # Levytilan tarkistus — yksi levy vie ~7 GB väliaikaiset tiedostot mukaan lukien
+    ensure_terastation || die "Terastation ei saatu mountattua"
+    local local_gb tera_gb
+    local_gb=$(df "$OUTBASE" | awk 'NR==2 {printf "%d", $4/1024/1024}')
+    tera_gb=$(df "$DEST_ROOT" | awk 'NR==2 {printf "%d", $4/1024/1024}')
+    log "Tilaa: brainbin ${local_gb} GB vapaana, terastation ${tera_gb} GB vapaana"
+    (( local_gb < 14 )) && log "VAROITUS: Brainbinillä vain ${local_gb} GB — tilaa ehkä vain yhdelle levylle"
+    (( local_gb <  8 )) && die "Brainbinillä ei riitä tilaa (${local_gb} GB) �� pysäytetään"
+    (( tera_gb  < 20 )) && log "VAROITUS: Terastationilla vain ${tera_gb} GB vapaana"
+    (( tera_gb  <  5 )) && die "Terastationilla kriittisen vähän tilaa (${tera_gb} GB) — pysäytetään"
 
-    check_space
-
+    # Session-hakemisto: yksi sessio = yksi käyttökerta (useita levyjä)
     local session_dir="${OUTBASE}/session_$(date +%Y%m%d_%H%M%S)"
     mkdir -p "$session_dir"
 
+    # Edellisen levyn metatiedot oletuksina seuraavalle — käyttäjän ei tarvitse
+    # kirjoittaa sarjan nimeä ja kautta uudelleen joka levylle
     local p_type="" p_name="" p_season="" p_ep=""
     local disc_num=0
 
+    # ── Rippaussilmukka: lisää levyjä kunnes käyttäjä kirjoittaa 'q' ─────────
     while true; do
         echo ""
-        echo "══════════════════════════════════════════════"
+        echo "══════════════���═══════════════════════════════"
         printf '  Levyjä ripattuna tässä sessiossa: %d\n' "$disc_num"
         echo "══════════════════════════════════════════════"
         local cmd=""
         read -rp "  Lisää levy ja paina Enter  (q = aloita enkoodaus): " cmd
         [[ "${cmd,,}" == "q" ]] && break
 
+        # Kysy levyn metatiedot — palaa \x1F-eroteltuna merkkijonona
         local meta_str
         meta_str=$(ask_meta "$p_type" "$p_name" "$p_season" "$p_ep")
         IFS=$'\x1f' read -r p_type p_name p_season p_ep <<< "$meta_str"
-        [[ -z "$p_name" ]] && continue  # ask_meta palautti virhe
+        [[ -z "$p_name" ]] && continue  # ask_meta palautti virhe (esim. tyhjä nimi)
 
+        # Näytä yhteenveto ja pyydä vahvistus
         echo ""
         case "$p_type" in
         series) printf '  → %s S%02d alkaen E%02d\n' "$p_name" "$p_season" "$p_ep" ;;
@@ -508,14 +735,16 @@ main() {
         read -rp "  Oikein? (k/e=peruuta): " ok
         if [[ "${ok,,}" == "e" ]]; then p_name=""; continue; fi
 
-        # Tarkista terastationilta onko kohde jo olemassa
+        # ── Terastationin päällekkäisyystarkistus ────────────────────────────
+        # Varoittaa jos kohdepolulla on jo tiedostoja — ehkäisee vahingollisen ylikirjoituksen.
+        # Sarjoille tarkistetaan enintään 50 seuraavaa jaksoa.
         local tera_dest
         tera_dest=$(dest_path "$p_type" "$p_name" "${p_season:-}")
         if [[ -d "$tera_dest" ]]; then
             local tera_existing=()
             if [[ "$p_type" == series ]]; then
                 local _ce; _ce="$p_ep"
-                while (( _ce < p_ep + 10 )); do
+                while (( _ce < p_ep + 50 )); do
                     local _fn="${p_name} S$(printf '%02d' "$p_season")E$(printf '%02d' "$_ce").mkv"
                     [[ -f "${tera_dest}/${_fn}" ]] && tera_existing+=("$_fn")
                     (( _ce++ ))
@@ -534,7 +763,10 @@ main() {
             fi
         fi
 
-        # Varoita jos sarjan jaksonumerot menevät päällekkäin aiemman levyn kanssa
+        # ── Session-sisäinen päällekkäisyystarkistus ─────────────────────────
+        # Varoittaa jos tämän session aiempi levy kattaa samat jaksot.
+        # Tämä tapahtuu helposti kun DVD:t menevät hieman päällekkäin (esim. Wire S04:
+        # disc-005 loppuu E04:een ja disc-006 alkaa E04:stä).
         if [[ "$p_type" == series ]]; then
             local prev_mf
             for prev_mf in "${session_dir}"/disc-*/meta.conf; do
@@ -556,30 +788,39 @@ main() {
             done
         fi
 
-        check_space
+        # Levytilan tarkistus ennen jokaista levyä
+        local_gb=$(df "$OUTBASE" | awk 'NR==2 {printf "%d", $4/1024/1024}')
+        tera_gb=$(df "$DEST_ROOT" | awk 'NR==2 {printf "%d", $4/1024/1024}')
+        (( local_gb <  8 )) && die "Brainbinillä ei riitä tilaa (${local_gb} GB) — pysäytetään"
+        (( tera_gb  <  5 )) && die "Terastationilla kriittisen vähän tilaa (${tera_gb} GB) — pysäytetään"
         log "Levy $((disc_num+1)): $p_type | $p_name | $p_season | ep=$p_ep"
+
         echo "  Odotetaan levyasemaa..."
-        local disc_info; disc_info=$(wait_for_disc)
-        local disc_idx="${disc_info%% *}"
-        local disc_dev="${disc_info##* }"
+        local disc_dev; disc_dev=$(wait_for_disc)
 
         (( disc_num++ ))
         local raw_dir="${session_dir}/disc-$(printf '%03d' "$disc_num")"
         mkdir -p "$raw_dir"
 
+        # Kirjoita meta.conf heti kaikilla tunnetuilla kentillä.
+        # RIP_MODE kirjoitetaan tässä (ei vasta onnistuneen rippauksen jälkeen)
+        # koska skripti käyttää nyt AINA dvdbackup-tilaa. Aiempi ratkaisu (RIP_MODE
+        # lisättiin myöhemmin) rikkoi recover-tilanteen: jos skripti kaatui rippauksen
+        # aikana, meta.conf:ssa ei ollut RIP_MODE:a ja encode_session ei löytänyt dvdbackup-hakemistoa.
         {
             echo "TYPE=${p_type}"
             echo "NAME=${p_name}"
             echo "SEASON=${p_season}"
             echo "START_EP=${p_ep}"
+            echo "RIP_MODE=dvdbackup"
         } > "${raw_dir}/meta.conf"
 
         log "Ripataan disc ${disc_num} dvdbackupilla (${disc_dev})..."
-        local mkv_log="${raw_dir}/makemkv.log"
+        local rip_log="${raw_dir}/rip.log"
         local dv_dir="${raw_dir}/dvdbackup"
         mkdir -p "$dv_dir"
 
-        # Levyn kokonaiskoko edistymispalkia varten
+        # Levyn kokonaiskoko edistymispalkkia varten — ensin isosize, sitten blockdev
         local disc_total_hr=""
         disc_total_hr=$(python3 -c "
 import subprocess, sys
@@ -594,21 +835,29 @@ for u, d in [('G', 1024**3), ('M', 1024**2)]:
     if b >= d: print(f'{b/d:.1f}{u}'); break
 " "$disc_dev" 2>/dev/null || true)
 
-        # Taustaprosessi näyttää edistymisen 10s välein
-        ( while true; do
-            sleep 10
-            local sz; sz=$(du -sh "$dv_dir" 2>/dev/null | cut -f1)
-            if [[ -n "$disc_total_hr" ]]; then
-                printf '\r  [rippaus] %s / %s kopioitu...' "$sz" "$disc_total_hr" >&2
-            else
-                printf '\r  [rippaus] %s kopioitu...' "$sz" >&2
-            fi
-          done ) &
+        # Taustaprosessi näyttää rippauksen edistymisen 10 s välein terminaalissa.
+        # Subshell-muuttujat ovat kopioita parent-shellin arvoista fork-hetkellä.
+        # Tämä prosessi tapetaan välittömästi kun dvdbackup valmistuu (kill progress_pid).
+        (
+            while true; do
+                sleep 10
+                sz=$(du -sh "$dv_dir" 2>/dev/null | cut -f1)
+                if [[ -n "$disc_total_hr" ]]; then
+                    printf '\r  [rippaus] %s / %s kopioitu...' "$sz" "$disc_total_hr" >&2
+                else
+                    printf '\r  [rippaus] %s kopioitu...' "$sz" >&2
+                fi
+            done
+        ) &
         local progress_pid=$!
 
+        # Rippaa DVD — -M = koko levy, ei vain valittua otsikkoa
+        # tee -a kirjoittaa rip-lokin sekä päälokin (LOGFILE) että erilliseen tiedostoon
+        # grep -c laskee lukuvirhet (palautuu myös exit-koodilla 1 jos ei yhtään osumaa,
+        # siksi || true)
         local read_errors=0
         dvdbackup -i "$disc_dev" -o "$dv_dir" -M 2>&1 \
-            | tee -a "$LOGFILE" | tee "$mkv_log" \
+            | tee -a "$LOGFILE" | tee "$rip_log" \
             | grep -c 'Error reading' > "${raw_dir}/read_errors.tmp" || true
 
         kill "$progress_pid" 2>/dev/null; wait "$progress_pid" 2>/dev/null || true
@@ -617,20 +866,26 @@ for u, d in [('G', 1024**3), ('M', 1024**2)]:
         read_errors=$(cat "${raw_dir}/read_errors.tmp" 2>/dev/null || echo 0)
         rm -f "${raw_dir}/read_errors.tmp"
 
+        # Tarkista onnistuminen VOB-tiedostojen avulla — ei dvdbackupin exit-koodilla
+        # koska dvdbackup saattaa palauttaa 0 myös osittain epäonnistuneessa tilanteessa.
+        # VTS_*_[1-9].VOB = varsinainen videosisältö (ei menu, ei tyhjä raita)
         local vob_count
         vob_count=$(find "$dv_dir" -name "VTS_*_[1-9].VOB" -size +10M 2>/dev/null | wc -l)
         if (( vob_count == 0 )); then
-            log "VIRHE: dvdbackup epäonnistui — levy ${disc_num} ohitetaan"
+            log "VIRHE: dvdbackup epäonnistui (ei VOB-tiedostoja) — levy ${disc_num} ohitetaan"
             eject "$disc_dev" 2>/dev/null || true
             rm -rf "$raw_dir"
             (( disc_num-- )) || true
             continue
         fi
-        echo "RIP_MODE=dvdbackup" >> "${raw_dir}/meta.conf"
+
         if (( read_errors > 0 )); then
             log "VAROITUS: ${read_errors} lukuvirhettä rippauksen aikana — tarkista lopputulos!"
             echo "READ_ERRORS=${read_errors}" >> "${raw_dir}/meta.conf"
         fi
+
+        # Skannaa raitalukumäärä HandBrakella — tallennetaan meta.conf:iin TITLE_COUNT:ksi.
+        # Enkoodausvaiheessa verrataan tähän ja varoitetaan jos poikkeama (levy saattanut muuttua).
         log "dvdbackup onnistui (${vob_count} VOB). Skannataan raidat..."
         local dvd_inner; dvd_inner=$(find "$dv_dir" -mindepth 1 -maxdepth 1 -type d | head -1)
         local title_count
@@ -640,7 +895,7 @@ for u, d in [('G', 1024**3), ('M', 1024**2)]:
 
         eject "$disc_dev" 2>/dev/null || true
 
-        # Päivitä jaksonumero seuraavaa levyä varten
+        # Päivitä jaksonumero seuraavaa levyä varten (session-laskuri)
         if [[ "$p_type" == series ]] && (( title_count > 0 )); then
             p_ep=$(( p_ep + title_count ))
         fi
@@ -651,13 +906,12 @@ for u, d in [('G', 1024**3), ('M', 1024**2)]:
     fi
 
     echo ""
-    echo "══════════════════════════════════════════════"
+    echo "═══════════════════════════���══════════════════"
     printf '  %d levy/levyä ripattuna. Aloitetaan enkoodaus...\n' "$disc_num"
     echo "══════════════════════════════════════════════"
     echo ""
 
     encode_session "$session_dir"
-
     log "═══ Kaikki valmis! ═══"
 }
 
