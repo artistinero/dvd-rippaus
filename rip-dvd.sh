@@ -490,20 +490,57 @@ main() {
         read -rp "  Lisää levy ja paina Enter  (q = aloita enkoodaus): " cmd
         [[ "${cmd,,}" == "q" ]] && break
 
-        local meta_str
-        meta_str=$(ask_meta "$p_type" "$p_name" "$p_season" "$p_ep")
-        IFS=$'\x1f' read -r p_type p_name p_season p_ep <<< "$meta_str"
+        # Kysy metatiedot — sisäinen silmukka mahdollistaa uudelleenyrittämisen
+        while true; do
+            local meta_str
+            meta_str=$(ask_meta "$p_type" "$p_name" "$p_season" "$p_ep")
+            IFS=$'\x1f' read -r p_type p_name p_season p_ep <<< "$meta_str"
+            [[ -z "$p_name" ]] && break  # ask_meta palautti virhe
 
-        echo ""
-        case "$p_type" in
-        series) printf '  → %s S%02d alkaen E%02d\n' "$p_name" "$p_season" "$p_ep" ;;
-        movie)  printf '  → Elokuva: %s (%s)\n'      "$p_name" "$p_season" ;;
-        doc)    printf '  → Dokumentti: %s (%s)\n'   "$p_name" "$p_season" ;;
-        music)  printf '  → Musiikki: %s\n'          "$p_name" ;;
-        misc)   printf '  → Misc: %s\n'              "$p_name" ;;
-        esac
+            echo ""
+            case "$p_type" in
+            series) printf '  → %s S%02d alkaen E%02d\n' "$p_name" "$p_season" "$p_ep" ;;
+            movie)  printf '  → Elokuva: %s (%s)\n'      "$p_name" "$p_season" ;;
+            doc)    printf '  → Dokumentti: %s (%s)\n'   "$p_name" "$p_season" ;;
+            music)  printf '  → Musiikki: %s\n'          "$p_name" ;;
+            misc)   printf '  → Misc: %s\n'              "$p_name" ;;
+            esac
 
-        [[ -z "$p_name" ]] && continue  # ask_meta palautti virhe
+            local ok=""
+            read -rp "  Oikein? (k/e=korjaa/q=peruuta): " ok
+            case "${ok,,}" in
+                e) continue ;;
+                q) p_name=""; break ;;
+                *) break ;;
+            esac
+        done
+        [[ -z "$p_name" ]] && continue
+
+        # Tarkista terastationilta onko kohde jo olemassa
+        local tera_dest
+        tera_dest=$(dest_path "$p_type" "$p_name" "${p_season:-}")
+        if [[ -d "$tera_dest" ]]; then
+            local tera_existing=()
+            if [[ "$p_type" == series ]]; then
+                local _ce; _ce="$p_ep"
+                while (( _ce < p_ep + 10 )); do
+                    local _fn="${p_name} S$(printf '%02d' "$p_season")E$(printf '%02d' "$_ce").mkv"
+                    [[ -f "${tera_dest}/${_fn}" ]] && tera_existing+=("$_fn")
+                    (( _ce++ ))
+                done
+            else
+                while IFS= read -r _f; do tera_existing+=("${_f##*/}"); done \
+                    < <(find "$tera_dest" -maxdepth 1 -name "*.mkv" 2>/dev/null | sort)
+            fi
+            if (( ${#tera_existing[@]} > 0 )); then
+                echo "" >&2
+                echo "  HUOMIO: Terastationilla on jo tiedostoja:" >&2
+                for _ef in "${tera_existing[@]}"; do echo "    ${_ef}" >&2; done
+                local over_ok=""
+                read -rp "  Ripataanko silti? (k/e): " over_ok
+                [[ "${over_ok,,}" != "k" ]] && continue
+            fi
+        fi
 
         # Varoita jos sarjan jaksonumerot menevät päällekkäin aiemman levyn kanssa
         if [[ "$p_type" == series ]]; then
@@ -520,9 +557,8 @@ main() {
                     echo "" >&2
                     echo "  VAROITUS: Päällekkäisyys! Aiempi levy alkaa E${prev_ep} ja kattaa ${prev_count} raitaa." >&2
                     echo "  Tämä levy alkaa E${p_ep} — E$(( prev_ep + prev_count - 1 )) tulee kahdesti." >&2
-                    echo "  Jatketaanko silti? (k/e)" >&2
                     local confirm=""
-                    read -rp "  > " confirm
+                    read -rp "  Jatketaanko silti? (k/e): " confirm
                     [[ "${confirm,,}" != "k" ]] && continue 2
                 fi
             done
