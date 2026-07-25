@@ -490,27 +490,23 @@ main() {
         read -rp "  Lisää levy ja paina Enter  (q = aloita enkoodaus): " cmd
         [[ "${cmd,,}" == "q" ]] && break
 
-        # Kysy metatiedot — sisäinen silmukka mahdollistaa uudelleenyrittämisen
-        while true; do
-            local meta_str
-            meta_str=$(ask_meta "$p_type" "$p_name" "$p_season" "$p_ep")
-            IFS=$'\x1f' read -r p_type p_name p_season p_ep <<< "$meta_str"
-            [[ -z "$p_name" ]] && break  # ask_meta palautti virhe
+        local meta_str
+        meta_str=$(ask_meta "$p_type" "$p_name" "$p_season" "$p_ep")
+        IFS=$'\x1f' read -r p_type p_name p_season p_ep <<< "$meta_str"
+        [[ -z "$p_name" ]] && continue  # ask_meta palautti virhe
 
-            echo ""
-            case "$p_type" in
-            series) printf '  → %s S%02d alkaen E%02d\n' "$p_name" "$p_season" "$p_ep" ;;
-            movie)  printf '  → Elokuva: %s (%s)\n'      "$p_name" "$p_season" ;;
-            doc)    printf '  → Dokumentti: %s (%s)\n'   "$p_name" "$p_season" ;;
-            music)  printf '  → Musiikki: %s\n'          "$p_name" ;;
-            misc)   printf '  → Misc: %s\n'              "$p_name" ;;
-            esac
+        echo ""
+        case "$p_type" in
+        series) printf '  → %s S%02d alkaen E%02d\n' "$p_name" "$p_season" "$p_ep" ;;
+        movie)  printf '  → Elokuva: %s (%s)\n'      "$p_name" "$p_season" ;;
+        doc)    printf '  → Dokumentti: %s (%s)\n'   "$p_name" "$p_season" ;;
+        music)  printf '  → Musiikki: %s\n'          "$p_name" ;;
+        misc)   printf '  → Misc: %s\n'              "$p_name" ;;
+        esac
 
-            local ok=""
-            read -rp "  Oikein? (k/e=korjaa): " ok
-            [[ "${ok,,}" == "e" ]] && continue || break
-        done
-        [[ -z "$p_name" ]] && continue
+        local ok=""
+        read -rp "  Oikein? (k/e=peruuta): " ok
+        if [[ "${ok,,}" == "e" ]]; then p_name=""; continue; fi
 
         # Tarkista terastationilta onko kohde jo olemassa
         local tera_dest
