@@ -288,6 +288,8 @@ encode_session() {
             local dvd_dir
             dvd_dir=$(find "${raw_dir}/dvdbackup" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)
             [[ -z "$dvd_dir" ]] && { log "VIRHE: dvdbackup ei löydy — ${raw_dir##*/}"; continue; }
+            local read_errors_stored; read_errors_stored=$(grep '^READ_ERRORS=' "$mf" 2>/dev/null | cut -d= -f2 || echo "")
+            [[ -n "$read_errors_stored" ]] && log "!!! HUONO LEVY: ${read_errors_stored} lukuvirhettä rippauksen aikana — tarkista lopputulos: ${raw_dir##*/} !!!"
             local titles=()
             while IFS= read -r t; do titles+=("$t"); done < <(hb_scan_long_titles "$dvd_dir")
             (( ${#titles[@]} == 0 )) && { log "VAROITUS: ei raitoja — ${raw_dir##*/}"; continue; }
@@ -424,6 +426,12 @@ encode_session() {
     kill "$tpid" 2>/dev/null || true
     trap - INT TERM
     log "═══ Enkoodaus valmis — yhteensä $(fmt_time "$total_secs") ═══"
+
+    # Muistuta lukuvirhelevyistä
+    while IFS= read -r mf; do
+        local errs; errs=$(grep '^READ_ERRORS=' "$mf" 2>/dev/null | cut -d= -f2 || echo "")
+        [[ -n "$errs" ]] && log "!!! TARKISTA LOPPUTULOS: $(grep '^NAME=' "$mf" | cut -d= -f2-) — ${errs} lukuvirhettä rippauksen aikana !!!"
+    done < <(find "$session_dir" -name "meta.conf" | sort)
 }
 
 # ── Pääohjelma ────────────────────────────────────────────────────────────────
@@ -547,11 +555,16 @@ for u, d in [('G', 1024**3), ('M', 1024**2)]:
           done ) &
         local progress_pid=$!
 
+        local read_errors=0
         dvdbackup -i "$disc_dev" -o "$dv_dir" -M 2>&1 \
-            | tee -a "$LOGFILE" | tee "$mkv_log"
+            | tee -a "$LOGFILE" | tee "$mkv_log" \
+            | grep -c 'Error reading' > "${raw_dir}/read_errors.tmp" || true
 
         kill "$progress_pid" 2>/dev/null; wait "$progress_pid" 2>/dev/null || true
         printf '\n' >&2
+
+        read_errors=$(cat "${raw_dir}/read_errors.tmp" 2>/dev/null || echo 0)
+        rm -f "${raw_dir}/read_errors.tmp"
 
         local vob_count
         vob_count=$(find "$dv_dir" -name "VTS_*_[1-9].VOB" -size +10M 2>/dev/null | wc -l)
@@ -563,6 +576,10 @@ for u, d in [('G', 1024**3), ('M', 1024**2)]:
             continue
         fi
         echo "RIP_MODE=dvdbackup" >> "${raw_dir}/meta.conf"
+        if (( read_errors > 0 )); then
+            log "VAROITUS: ${read_errors} lukuvirhettä rippauksen aikana — tarkista lopputulos!"
+            echo "READ_ERRORS=${read_errors}" >> "${raw_dir}/meta.conf"
+        fi
         log "dvdbackup onnistui (${vob_count} VOB). Skannataan raidat..."
         local dvd_inner; dvd_inner=$(find "$dv_dir" -mindepth 1 -maxdepth 1 -type d | head -1)
         local title_count
