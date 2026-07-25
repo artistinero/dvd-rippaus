@@ -118,20 +118,12 @@ with open(sys.argv[1], "a") as lf:
 }
 
 wait_for_disc() {
-    # Returns "disc_index /dev/srN"
-    local info=""
-    while [[ -z "$info" ]]; do
-        info=$(makemkvcon -r info disc:9999 2>/dev/null | python3 -c "
-import sys, re
-for line in sys.stdin:
-    m = re.match(r'^DRV:(\d+),\d+,\d+,\d+,\"[^\"]*\",\"([^\"]+)\",\"([^\"]+)\"', line.strip())
-    if m:
-        print(m.group(1) + ' ' + m.group(3))
-        break
-" 2>/dev/null || true)
-        [[ -z "$info" ]] && sleep 10
+    # Returns "0 /dev/srN" when a readable disc is detected
+    local dev="/dev/sr1"
+    while ! dd if="$dev" count=1 bs=2048 of=/dev/null status=none 2>/dev/null; do
+        sleep 10
     done
-    echo "$info"
+    echo "0 $dev"
 }
 
 sorted_titles() {
