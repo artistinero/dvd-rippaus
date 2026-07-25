@@ -360,7 +360,7 @@ encode_session() {
 
         # ── Palautuminen: ohita jos jo terastationilla (>100MB) ──────────────
         if [[ -f "${dest}/${out_name}" ]] && \
-           [[ $(stat -c%s "${dest}/${out_name}" 2>/dev/null || echo 0) -gt 104857600 ]]; then
+           [[ $(stat -c%s "${dest}/${out_name}" 2>/dev/null || echo 0) -gt 1048576 ]]; then
             log "  Ohitetaan (jo valmis): ${out_name}"
             continue
         fi
@@ -413,7 +413,7 @@ encode_session() {
         [[ "$_m" != "dvdbackup" ]] && continue
         [[ -z "${_src_ok[$_src]+x}" ]] && _src_ok["$_src"]="yes"
         if ! [[ -f "${_dest}/${_out}" ]] || \
-           (( $(stat -c%s "${_dest}/${_out}" 2>/dev/null || echo 0) <= 104857600 )); then
+           (( $(stat -c%s "${_dest}/${_out}" 2>/dev/null || echo 0) <= 1048576 )); then
             _src_ok["$_src"]="no"
         fi
     done < "$queue"
