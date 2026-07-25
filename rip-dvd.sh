@@ -444,6 +444,9 @@ encode_session() {
 
         # TITLE_COUNT tallennettiin rippausvaiheessa — vertailua varten
         local expected_count; expected_count=$(grep '^TITLE_COUNT=' "$mf" 2>/dev/null | cut -d= -f2 || echo "")
+        # MAX_EPISODES: valinnainen, rajoittaa montako titteliä enkoodataan jaksoiksi.
+        # Käytetään kun levy sisältää ekstroja jotka muuten saisivat väärän jaksonumeron.
+        local max_episodes; max_episodes=$(grep '^MAX_EPISODES=' "$mf" 2>/dev/null | cut -d= -f2 || echo "")
         local dest; dest=$(dest_path "$type" "$name" "$season")
 
         # Tarkista että dvdbackup-hakemisto on olemassa.
@@ -465,6 +468,12 @@ encode_session() {
         local titles=()
         while IFS= read -r t; do titles+=("$t"); done < <(hb_scan_long_titles "$dvd_dir")
         (( ${#titles[@]} == 0 )) && { log "VAROITUS: ei enkoodattavia raitoja — ${raw_dir##*/}"; continue; }
+
+        # Rajoita MAX_EPISODES:iin jos asetettu
+        if [[ -n "$max_episodes" ]] && (( max_episodes > 0 )) && (( ${#titles[@]} > max_episodes )); then
+            log "  MAX_EPISODES=${max_episodes}: rajoitetaan ${#titles[@]} → ${max_episodes} raitaan (${raw_dir##*/})"
+            titles=("${titles[@]:0:$max_episodes}")
+        fi
 
         # Vertaa skannauksen tulosta rippausvaiheessa tallennettuun arvoon
         if [[ -n "$expected_count" ]] && (( ${#titles[@]} != expected_count )); then
