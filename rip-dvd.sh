@@ -19,7 +19,7 @@ OUTBASE="/home/keitsi/dvd-rip-tmp"
 DEST_ROOT="/mnt/terastation/dlna/vids"
 LOGFILE="/home/keitsi/rip-dvd.log"
 TEMP_WARN=85
-TEMP_RESUME=65
+TEMP_RESUME=50
 MIN_DURATION=60  # sekuntia — lyhyemmät raidat ohitetaan
 
 # ── Apufunktiot ───────────────────────────────────────────────────────────────
