@@ -505,6 +505,29 @@ main() {
 
         [[ -z "$p_name" ]] && continue  # ask_meta palautti virhe
 
+        # Varoita jos sarjan jaksonumerot menevät päällekkäin aiemman levyn kanssa
+        if [[ "$p_type" == series ]]; then
+            local prev_mf
+            for prev_mf in "${session_dir}"/disc-*/meta.conf; do
+                [[ -f "$prev_mf" ]] || continue
+                local prev_name prev_season prev_ep prev_count
+                prev_name=$(grep '^NAME=' "$prev_mf" | cut -d= -f2-)
+                prev_season=$(grep '^SEASON=' "$prev_mf" | cut -d= -f2-)
+                prev_ep=$(grep '^START_EP=' "$prev_mf" | cut -d= -f2-)
+                prev_count=$(grep '^TITLE_COUNT=' "$prev_mf" 2>/dev/null | cut -d= -f2 || echo 0)
+                if [[ "$prev_name" == "$p_name" && "$prev_season" == "$p_season" ]] \
+                   && (( p_ep < prev_ep + prev_count )); then
+                    echo "" >&2
+                    echo "  VAROITUS: Päällekkäisyys! Aiempi levy alkaa E${prev_ep} ja kattaa ${prev_count} raitaa." >&2
+                    echo "  Tämä levy alkaa E${p_ep} — E$(( prev_ep + prev_count - 1 )) tulee kahdesti." >&2
+                    echo "  Jatketaanko silti? (k/e)" >&2
+                    local confirm=""
+                    read -rp "  > " confirm
+                    [[ "${confirm,,}" != "k" ]] && continue 2
+                fi
+            done
+        fi
+
         check_space
         log "Levy $((disc_num+1)): $p_type | $p_name | $p_season | ep=$p_ep"
         echo "  Odotetaan levyasemaa..."
