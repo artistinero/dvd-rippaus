@@ -837,6 +837,8 @@ main() {
                 prev_season=$(grep '^SEASON=' "$prev_mf" | cut -d= -f2-)
                 prev_ep=$(grep '^START_EP=' "$prev_mf" | cut -d= -f2-)
                 prev_count=$(grep '^TITLE_COUNT=' "$prev_mf" 2>/dev/null | cut -d= -f2 || echo 0)
+                local prev_max_ep; prev_max_ep=$(grep '^MAX_EPISODES=' "$prev_mf" 2>/dev/null | cut -d= -f2 || echo 0)
+                (( prev_max_ep > 0 && prev_max_ep < prev_count )) && prev_count=$prev_max_ep
                 if [[ "$prev_name" == "$p_name" && "$prev_season" == "$p_season" ]] \
                    && (( p_ep < prev_ep + prev_count )); then
                     echo "" >&2
@@ -932,7 +934,9 @@ for u, d in [('G', 1024**3), ('M', 1024**2)]:
 
             cat "$rip_tmplog" >> "$LOGFILE" || true
             cp "$rip_tmplog" "$rip_log" 2>/dev/null || true
-            read_errors=$(grep -c 'Error reading' "$rip_tmplog" 2>/dev/null || echo 0)
+            read_errors=$(grep -c 'Error reading' "$rip_tmplog" 2>/dev/null | head -1 || echo 0)
+            read_errors="${read_errors//[^0-9]/}"
+            read_errors="${read_errors:-0}"
             rm -f "$rip_tmplog"
 
             if (( timed_out )); then
