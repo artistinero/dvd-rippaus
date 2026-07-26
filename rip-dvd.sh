@@ -139,14 +139,18 @@ fmt_time() {
 ensure_terastation() {
     local mountpt="/mnt/terastation/dlna"
     mountpoint -q "$mountpt" && return 0
-    local tries=5 try
+    local tries=5 try mount_out
     for (( try=1; try<=tries; try++ )); do
         log "Terastation ei mountattu — yritetään ($try/$tries)..."
-        mount /mnt/terastation 2>/dev/null \
-            || mount "$mountpt"  2>/dev/null \
-            || true
-        sleep 10
-        mountpoint -q "$mountpt" && return 0
+        if ! mount_out=$(sudo mount "$mountpt" 2>&1); then
+            mount_out=$(mount "$mountpt" 2>&1) || true
+        fi
+        if mountpoint -q "$mountpt"; then
+            log "  Terastation mountattu."
+            return 0
+        fi
+        [[ -n "$mount_out" ]] && log "  mount-virhe: ${mount_out}"
+        (( try < tries )) && sleep 10
     done
     log "VIRHE: terastation ei saatu mountattua ${tries} yrityksellä"
     return 1
@@ -176,6 +180,12 @@ run_hb() {
     local title_arg=()
     [[ -n "${3:-}" ]] && title_arg=(--title "$3")
     local label="${4:-}"
+
+    # HandBrake kirjoittaa väliaikaistiedostoon — ei putkea, ei SIGPIPE-riskiä.
+    # Python3 seuraa tiedostoa tail -f:llä erillisenä prosessina.
+    # Python3:n kuolema ei vaikuta HandBrakeen millään tavalla.
+    local tmpout; tmpout=$(mktemp --tmpdir "rip-dvd-hb-XXXXXX.log")
+
     HandBrakeCLI \
         --input "$1" "${title_arg[@]}" --output "$2" \
         --encoder x265 --quality 21 \
@@ -183,47 +193,47 @@ run_hb() {
         --loose-anamorphic --crop-mode auto \
         --all-audio --aencoder copy --audio-fallback aac \
         --all-subtitles --markers \
-        </dev/null 2>&1 | python3 -c '
-import sys, re
-label = sys.argv[2] if len(sys.argv) > 2 else ""
-last_pct = -5
-buf = b""
-stdin_b = sys.stdin.buffer
-with open(sys.argv[1], "a") as lf:
-    while True:
-        ch = stdin_b.read(1)
-        if not ch:
-            # EOF: tyhjennä mahdollinen viimeinen rivi ilman rivinvaihtoa
-            if buf:
-                line = buf.decode("utf-8", errors="replace")
-                sys.stdout.write(line + "\n"); lf.write(line + "\n")
-            break
-        if ch == b"\r":
-            # HandBrake käyttää \r edistymisrivillä — näytä terminaalissa, kirjoita lokiin 5% välein
-            line = buf.decode("utf-8", errors="replace")
-            sys.stdout.write("\r  " + line.strip()); sys.stdout.flush()
-            m = re.search(r"(\d+\.\d+) %.*ETA\s+(\S+)", line)
-            if m:
-                pct = float(m.group(1))
-                eta = m.group(2)
-                if pct - last_pct >= 5:
-                    last_pct = pct
-                    msg = f"  [{label}] {pct:.1f}%  ETA {eta}"
-                    lf.write(msg + "\n"); lf.flush()
-            buf = b""
-        elif ch == b"\n":
-            # Normaali rivi — kirjoita lokiin (suodata pois tyhjät ja varoitukset)
-            line = buf.decode("utf-8", errors="replace")
-            if line.strip():
-                sys.stdout.write("\n" + line); sys.stdout.flush()
-                lf.write(line); lf.flush()
-            buf = b""
-        else:
-            buf += ch
-' "$LOGFILE" "$label"
-    # PIPESTATUS[0] = HandBrakeCLI exit-koodi, [1] = python3 exit-koodi.
-    # Palautetaan HandBrakeCLI:n koodi koska se kertoo enkoodauksen onnistumisesta.
-    return "${PIPESTATUS[0]}"
+        </dev/null >"$tmpout" 2>&1 &
+    local hb_pid=$!
+
+    # Edistymispalkki — erillinen prosessi, ei riippuvainen HandBrakesta
+    python3 -c '
+import sys, re, subprocess
+label, tmpout = sys.argv[1], sys.argv[2]
+last_pct = -5.0
+proc = subprocess.Popen(["tail", "-f", "-n", "0", tmpout],
+                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+try:
+    for raw in proc.stdout:
+        m = re.search(rb"(\d+\.\d+) %.*ETA\s+(\S+)", raw)
+        if m:
+            pct = float(m.group(1))
+            eta = m.group(2).decode("utf-8", errors="replace")
+            if pct - last_pct >= 5.0:
+                last_pct = pct
+                sys.stdout.write(f"\r  [{label}] {pct:.1f}%  ETA {eta}")
+                sys.stdout.flush()
+except Exception:
+    pass
+finally:
+    try: proc.terminate(); proc.wait()
+    except Exception: pass
+' "$label" "$tmpout" &
+    local py_pid=$!
+
+    wait "$hb_pid"
+    local rc=$?
+    kill "$py_pid" 2>/dev/null
+    wait "$py_pid" 2>/dev/null
+    echo >&2
+
+    # Lisää HandBraken output päälokiin: muunna \r → \n, poista tyhjät rivit ja
+    # toistuvat prosenttirivit (kirjoitetaan lokiin vain 5% välein python3:lla aiemmin,
+    # nyt pelkät \n-rivit riittävät — progress näkyy terminaalissa reaaliajassa).
+    sed $'s/\r/\n/g' "$tmpout" | grep -v ' ETA ' | grep -v '^$' >> "$LOGFILE" || true
+    rm -f "$tmpout"
+
+    return "$rc"
 }
 
 # Odottaa kunnes /dev/sr1-asemassa on luettava levy.
@@ -523,7 +533,10 @@ encode_session() {
     _encode_cleanup() {
         local -a _hb
         mapfile -t _hb < <(pgrep -x HandBrakeCLI 2>/dev/null)
-        (( ${#_hb[@]} > 0 )) && kill -CONT "${_hb[@]}" 2>/dev/null || true
+        if (( ${#_hb[@]} > 0 )); then
+            kill -CONT "${_hb[@]}" 2>/dev/null || true
+            kill -TERM "${_hb[@]}" 2>/dev/null || true
+        fi
         kill "$tpid" 2>/dev/null || true
         wait "$tpid" 2>/dev/null || true
         trap - INT TERM
@@ -626,7 +639,14 @@ encode_session() {
             fi
         else
             rm -f "$out"
-            log "  VIRHE: enkoodaus epäonnistui — ${out_name} (rc=${rc}, $(fmt_time "$t_secs"))"
+            local rc_note=""
+            case "$rc" in
+                137) rc_note=" (SIGKILL — ylikuumeneminen)" ;;
+                141) rc_note=" (SIGPIPE)" ;;
+                130) rc_note=" (SIGINT — keskeytys)" ;;
+                  2) rc_note=" (HandBrake: ei löydettyä titteliä — korruptoitunut lähde?)" ;;
+            esac
+            log "  VIRHE: enkoodaus epäonnistui — ${out_name} (rc=${rc}${rc_note}, $(fmt_time "$t_secs"))"
         fi
 
     done < "$queue"
@@ -864,10 +884,13 @@ for u, d in [('G', 1024**3), ('M', 1024**2)]:
         # tee -a kirjoittaa rip-lokin sekä päälokin (LOGFILE) että erilliseen tiedostoon
         # grep -c laskee lukuvirhet (palautuu myös exit-koodilla 1 jos ei yhtään osumaa,
         # siksi || true)
-        local read_errors=0
+        # dv_rc deklaroidaan ENNEN putkilinjaa jotta PIPESTATUS voidaan lukea heti sen jälkeen.
+        # || true ja local-deklaraatiot nollaisivat PIPESTATUS:n — siksi sijoitus erillisellä rivillä.
+        local read_errors=0 dv_rc=0
         dvdbackup -i "$disc_dev" -o "$dv_dir" -M 2>&1 \
             | tee -a "$LOGFILE" | tee "$rip_log" \
-            | grep -c 'Error reading' > "${raw_dir}/read_errors.tmp" || true
+            | grep -c 'Error reading' > "${raw_dir}/read_errors.tmp"
+        dv_rc="${PIPESTATUS[0]}"
 
         kill "$progress_pid" 2>/dev/null; wait "$progress_pid" 2>/dev/null || true
         printf '\n' >&2
@@ -875,17 +898,21 @@ for u, d in [('G', 1024**3), ('M', 1024**2)]:
         read_errors=$(cat "${raw_dir}/read_errors.tmp" 2>/dev/null || echo 0)
         rm -f "${raw_dir}/read_errors.tmp"
 
-        # Tarkista onnistuminen VOB-tiedostojen avulla — ei dvdbackupin exit-koodilla
-        # koska dvdbackup saattaa palauttaa 0 myös osittain epäonnistuneessa tilanteessa.
-        # VTS_*_[1-9].VOB = varsinainen videosisältö (ei menu, ei tyhjä raita)
+        # Tarkista onnistuminen kahdella tavalla:
+        # 1) exit-koodi: dvdbackup exit!=0 on selvä merkki ongelmasta
+        # 2) VOB-tiedostot: dvdbackup voi palauttaa 0 osittain epäonnistuneessa tilanteessa,
+        #    tai exit!=0 mutta osa datasta kopioitiin — VOB-tarkistus on viimesijainen
         local vob_count
         vob_count=$(find "$dv_dir" -name "VTS_*_[1-9].VOB" -size +10M 2>/dev/null | wc -l)
         if (( vob_count == 0 )); then
-            log "VIRHE: dvdbackup epäonnistui (ei VOB-tiedostoja) — levy ${disc_num} ohitetaan"
+            log "VIRHE: dvdbackup epäonnistui (exit ${dv_rc}, ei VOB-tiedostoja) — levy ${disc_num} ohitetaan"
             eject "$disc_dev" 2>/dev/null || true
             rm -rf "$raw_dir"
             (( disc_num-- )) || true
             continue
+        fi
+        if (( dv_rc != 0 )); then
+            log "VAROITUS: dvdbackup exit ${dv_rc} (ei nolla) — VOB-tiedostoja löytyi silti, jatketaan"
         fi
 
         if (( read_errors > 0 )); then
