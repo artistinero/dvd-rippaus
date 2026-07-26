@@ -69,7 +69,7 @@ ENC_SPACE_MIN_GB=3
 # ── Apufunktiot ───────────────────────���───────────────────────────────────────
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOGFILE"; }
-die() { log "VIRHE: $*"; exit 1; }
+die() { log "VIRHE: $*"; echo "" >&2; read -rp "  [Paina Enter sulkeaksesi]" </dev/tty 2>/dev/null || sleep 10; exit 1; }
 
 # Palauttaa kaikkien lämpötila-antureiden maksimilukeman celsiusasteina.
 # Jos sensors ei ole asennettu tai epäonnistuu, palauttaa 0 (= ei throttlausta).
