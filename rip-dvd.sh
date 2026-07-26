@@ -69,7 +69,15 @@ ENC_SPACE_MIN_GB=3
 # ── Apufunktiot ───────────────────────���───────────────────────────────────────
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOGFILE"; }
-die() { log "VIRHE: $*"; echo "" >&2; read -rp "  [Paina Enter sulkeaksesi]" </dev/tty 2>/dev/null || sleep 10; exit 1; }
+die() { log "VIRHE: $*"; exit 1; }
+_exit_trap() {
+    local rc=$?
+    (( rc == 0 )) && return
+    echo "" >&2
+    echo "  Skripti kaatui (exit $rc) — katso loki: $LOGFILE" >&2
+    read -rp "  [Paina Enter sulkeaksesi]" </dev/tty 2>/dev/null || sleep 10
+}
+trap _exit_trap EXIT
 
 # Palauttaa kaikkien lämpötila-antureiden maksimilukeman celsiusasteina.
 # Jos sensors ei ole asennettu tai epäonnistuu, palauttaa 0 (= ei throttlausta).
