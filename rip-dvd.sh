@@ -56,6 +56,16 @@ MIN_DURATION=60
 # flock-pohjainen lukitus on atominen ytimen tasolla — pgrep-tarkistus ei ole.
 ENCODE_LOCKFILE="/tmp/rip-dvd-encode.lock"
 
+# Aikakatkaisu dvdbackupille sekunteina. Normaali rippaus ~20 min — 2 h on ylikärsivällinen.
+# Timeoutin jälkeen levy ohitetaan ja jatketaan seuraavaan tai enkoodaukseen.
+RIP_TIMEOUT=7200
+# Aikakatkaisu HandBrakelle per raita. 58 min jakso ~1 h, throttling voi pidentää 3–4 x.
+ENC_TIMEOUT=14400
+# Montako kertaa yritetään rippata uudelleen epäonnistumisen jälkeen (ei timeoutin jälkeen).
+MAX_RIP_ATTEMPTS=2
+# Minimitila brainbinillä enkoodauksen aikana — alle tämän pysäytetään.
+ENC_SPACE_MIN_GB=3
+
 # ── Apufunktiot ───────────────────────���───────────────────────────────────────
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOGFILE"; }
@@ -221,8 +231,20 @@ finally:
 ' "$label" "$tmpout" &
     local py_pid=$!
 
-    wait "$hb_pid"
+    local hb_waited=0 hb_timed_out=0
+    while kill -0 "$hb_pid" 2>/dev/null; do
+        sleep 10
+        (( hb_waited += 10 )) || true
+        if (( hb_waited >= ENC_TIMEOUT )); then
+            kill -KILL "$hb_pid" 2>/dev/null || true
+            hb_timed_out=1
+            break
+        fi
+    done
+    wait "$hb_pid" 2>/dev/null
     local rc=$?
+    (( hb_timed_out )) && rc=124
+
     kill "$py_pid" 2>/dev/null
     wait "$py_pid" 2>/dev/null
     echo >&2
@@ -552,6 +574,15 @@ encode_session() {
     while IFS=$'\x1f' read -r src out_name dest title_num disc_label disc_n; do
         (( done_n++ )) || true
 
+        # Levytilan tarkistus ennen enkoodausta — parempi pysähtyä selkeästi kuin antaa
+        # HandBraken epäonnistua myöhemmin ilman selkeää virheviestiä.
+        local enc_free_gb
+        enc_free_gb=$(df "$OUTBASE" | awk 'NR==2 {printf "%d", $4/1024/1024}')
+        if (( enc_free_gb < ENC_SPACE_MIN_GB )); then
+            log "VIRHE: Brainbinillä kriittisen vähän tilaa (${enc_free_gb} GB < ${ENC_SPACE_MIN_GB} GB) — pysäytetään enkoodaus"
+            break
+        fi
+
         # ── Palautuminen ─────────────────────────────────────────────────────
         ensure_terastation || log "  VAROITUS: terastation ei saatavilla tarkistushetkellä — jatketaan"
 
@@ -641,6 +672,7 @@ encode_session() {
             rm -f "$out"
             local rc_note=""
             case "$rc" in
+                124) rc_note=" (aikakatkaisu — HandBrake jumissa yli $(fmt_time "$ENC_TIMEOUT"))" ;;
                 137) rc_note=" (SIGKILL — ylikuumeneminen)" ;;
                 141) rc_note=" (SIGPIPE)" ;;
                 130) rc_note=" (SIGINT — keskeytys)" ;;
@@ -864,48 +896,65 @@ for u, d in [('G', 1024**3), ('M', 1024**2)]:
     if b >= d: print(f'{b/d:.1f}{u}'); break
 " "$disc_dev" 2>/dev/null || true)
 
-        # Taustaprosessi näyttää rippauksen edistymisen 10 s välein terminaalissa.
-        # Subshell-muuttujat ovat kopioita parent-shellin arvoista fork-hetkellä.
-        # Tämä prosessi tapetaan välittömästi kun dvdbackup valmistuu (kill progress_pid).
-        (
-            while true; do
+        # Rippaa DVD taustalla — mahdollistaa aikakatkaisu- ja uudelleenyrityslogiikan.
+        # Edistyminen päivitetään odotussilmukassa suoraan, ei erillisessä taustaprosessissa.
+        local read_errors=0 dv_rc=0 timed_out=0
+        local rip_attempt
+        for (( rip_attempt=1; rip_attempt<=MAX_RIP_ATTEMPTS; rip_attempt++ )); do
+            if (( rip_attempt > 1 )); then
+                log "  Uudelleenyritetään rippaus (yritys ${rip_attempt}/${MAX_RIP_ATTEMPTS})..."
+                find "$dv_dir" -mindepth 1 -delete 2>/dev/null || true
+            fi
+
+            local rip_tmplog; rip_tmplog=$(mktemp --tmpdir "rip-dvd-rip-XXXXXX.log")
+            dvdbackup -i "$disc_dev" -o "$dv_dir" -M >"$rip_tmplog" 2>&1 &
+            local dv_pid=$!
+            timed_out=0
+
+            local rip_waited=0
+            while kill -0 "$dv_pid" 2>/dev/null; do
                 sleep 10
-                sz=$(du -sh "$dv_dir" 2>/dev/null | cut -f1)
+                (( rip_waited += 10 )) || true
+                local sz; sz=$(du -sh "$dv_dir" 2>/dev/null | cut -f1)
                 if [[ -n "$disc_total_hr" ]]; then
-                    printf '\r  [rippaus] %s / %s kopioitu...' "$sz" "$disc_total_hr" >&2
+                    printf '\r  [rippaus] %s / %s  (%s kulunut)' "$sz" "$disc_total_hr" "$(fmt_time "$rip_waited")" >&2
                 else
-                    printf '\r  [rippaus] %s kopioitu...' "$sz" >&2
+                    printf '\r  [rippaus] %s  (%s kulunut)' "$sz" "$(fmt_time "$rip_waited")" >&2
+                fi
+                if (( rip_waited >= RIP_TIMEOUT )); then
+                    kill -KILL "$dv_pid" 2>/dev/null || true
+                    timed_out=1
+                    break
                 fi
             done
-        ) &
-        local progress_pid=$!
+            wait "$dv_pid" 2>/dev/null; dv_rc=$?
+            printf '\n' >&2
 
-        # Rippaa DVD — -M = koko levy, ei vain valittua otsikkoa
-        # tee -a kirjoittaa rip-lokin sekä päälokin (LOGFILE) että erilliseen tiedostoon
-        # grep -c laskee lukuvirhet (palautuu myös exit-koodilla 1 jos ei yhtään osumaa,
-        # siksi || true)
-        # dv_rc deklaroidaan ENNEN putkilinjaa jotta PIPESTATUS voidaan lukea heti sen jälkeen.
-        # || true ja local-deklaraatiot nollaisivat PIPESTATUS:n — siksi sijoitus erillisellä rivillä.
-        local read_errors=0 dv_rc=0
-        dvdbackup -i "$disc_dev" -o "$dv_dir" -M 2>&1 \
-            | tee -a "$LOGFILE" | tee "$rip_log" \
-            | grep -c 'Error reading' > "${raw_dir}/read_errors.tmp"
-        dv_rc="${PIPESTATUS[0]}"
+            cat "$rip_tmplog" >> "$LOGFILE" || true
+            cp "$rip_tmplog" "$rip_log" 2>/dev/null || true
+            read_errors=$(grep -c 'Error reading' "$rip_tmplog" 2>/dev/null || echo 0)
+            rm -f "$rip_tmplog"
 
-        kill "$progress_pid" 2>/dev/null; wait "$progress_pid" 2>/dev/null || true
-        printf '\n' >&2
+            if (( timed_out )); then
+                log "VIRHE: dvdbackup aikakatkaisu ($(fmt_time "$RIP_TIMEOUT")) — ei yritetä uudelleen"
+                break
+            fi
 
-        read_errors=$(cat "${raw_dir}/read_errors.tmp" 2>/dev/null || echo 0)
-        rm -f "${raw_dir}/read_errors.tmp"
+            # Onnistui jos VOB-tiedostoja löytyi ja exit-koodi 0
+            local vob_check
+            vob_check=$(find "$dv_dir" -name "VTS_*_[1-9].VOB" -size +10M 2>/dev/null | wc -l)
+            if (( vob_check > 0 && dv_rc == 0 )); then
+                break
+            fi
+            log "  Rippaus epäonnistui (exit ${dv_rc}, VOB-tiedostoja ${vob_check}) — yritys ${rip_attempt}/${MAX_RIP_ATTEMPTS}"
+        done
 
-        # Tarkista onnistuminen kahdella tavalla:
-        # 1) exit-koodi: dvdbackup exit!=0 on selvä merkki ongelmasta
-        # 2) VOB-tiedostot: dvdbackup voi palauttaa 0 osittain epäonnistuneessa tilanteessa,
-        #    tai exit!=0 mutta osa datasta kopioitiin — VOB-tarkistus on viimesijainen
         local vob_count
         vob_count=$(find "$dv_dir" -name "VTS_*_[1-9].VOB" -size +10M 2>/dev/null | wc -l)
-        if (( vob_count == 0 )); then
-            log "VIRHE: dvdbackup epäonnistui (exit ${dv_rc}, ei VOB-tiedostoja) — levy ${disc_num} ohitetaan"
+        if (( timed_out )) || (( vob_count == 0 )); then
+            local fail_reason="exit ${dv_rc}, ei VOB-tiedostoja"
+            (( timed_out )) && fail_reason="aikakatkaisu ${RIP_TIMEOUT}s"
+            log "VIRHE: dvdbackup epäonnistui (${fail_reason}) — levy ${disc_num} ohitetaan"
             eject "$disc_dev" 2>/dev/null || true
             rm -rf "$raw_dir"
             (( disc_num-- )) || true
