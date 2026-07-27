@@ -1195,14 +1195,12 @@ for line in sys.stdin.buffer:
 
     show_enc_status
     echo ""
-    echo "══════════════════════════════════════════════"
-    printf '  %d levy/levyä ripattuna.\n' "$disc_num"
-    echo "══════════════════════════════════════════════"
+    printf '  %d levy/levyä ripattuna — käynnistetään enkoodaus taustalle.\n' "$disc_num"
+    local enc_sname; enc_sname="enc-$(basename "$session_dir" | sed 's/session_//')"
+    tmux new-session -d -s "$enc_sname" "bash /usr/local/bin/rip-dvd.sh --encode-only '$session_dir'"
+    log "Enkoodaussessio käynnistetty: $enc_sname"
+    echo "  Seuraa: tmux attach -t $enc_sname"
     echo ""
-    read -rp "  [Paina Enter aloittaaksesi enkoodauksen — Ctrl+C poistuaksesi]" < /dev/tty
-    echo ""
-
-    encode_session "$session_dir"
     log "═══ Kaikki valmis! ═══"
 }
 
