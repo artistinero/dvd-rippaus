@@ -98,7 +98,7 @@ _wait_enter() {
     echo "" >&2
     echo "  Loki: $LOGFILE" >&2
     echo "  [Paina Enter sulkeaksesi — tai odota 60s]" >&2
-    read -r < /dev/tty 2>/dev/null || sleep 60
+    read -rt 60 < /dev/tty 2>/dev/null || true
 }
 die() {
     log "VIRHE: $*"
