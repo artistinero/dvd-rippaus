@@ -16,6 +16,31 @@ export TZ="Europe/Helsinki"
 # ── Tmux-autostart ─────────────────────���──────────────────────────────────────
 # Skripti vaatii tmux-session jotta prosessi jää eloon kun SSH-yhteys katkeaa.
 # Jos tmux ei ole päällä, skripti käynnistää itsensä uudelleen tmux-session sisällä.
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "--?" ]]; then
+    OUTBASE="/home/keitsi/dvd-rip-tmp"
+    cat <<'EOF'
+Käyttö:
+  rip-dvd.sh                           Normaali rippaus + enkoodaus
+  rip-dvd.sh --encode-only <hakemisto>  Enkoodaa olemassaoleva sessio uudelleen
+  rip-dvd.sh --help                    Tämä ohje
+
+--encode-only on hyödyllinen kun bootti tai muu keskeytys katkaisee enkoodauksen.
+Skripti ohittaa automaattisesti raidat jotka ovat jo terastationilla.
+
+EOF
+    echo "Olemassaolevat sessiot joissa on dvdbackup-dataa:"
+    local_found=0
+    for d in "$OUTBASE"/session_*/; do
+        [[ -d "$d" ]] || continue
+        if [[ -n "$(find "$d" -name "*.VOB" -size +10M 2>/dev/null | head -1)" ]]; then
+            echo "  rip-dvd.sh --encode-only $d"
+            local_found=1
+        fi
+    done
+    (( local_found )) || echo "  (ei löydy)"
+    exit 0
+fi
+
 _SESSION="dvd-rip"
 [[ "${1:-}" == "--encode-only" ]] && _SESSION="dvd-encode"
 if [[ -z "${TMUX:-}" ]]; then
@@ -74,8 +99,10 @@ _exit_trap() {
     local rc=$?
     (( rc == 0 )) && return
     echo "" >&2
-    echo "  Skripti kaatui (exit $rc) — katso loki: $LOGFILE" >&2
-    read -rp "  [Paina Enter sulkeaksesi]" </dev/tty 2>/dev/null || sleep 10
+    echo "  *** Skripti kaatui (exit $rc) ***" >&2
+    echo "  Loki: $LOGFILE" >&2
+    echo "  [Paina Enter sulkeaksesi — tai odota 60s]" >&2
+    read -r < /dev/tty 2>/dev/null || sleep 60
 }
 trap _exit_trap EXIT
 
@@ -784,6 +811,34 @@ main() {
     (( local_gb <  8 )) && die "Brainbinillä ei riitä tilaa (${local_gb} GB) �� pysäytetään"
     (( tera_gb  < 20 )) && log "VAROITUS: Terastationilla vain ${tera_gb} GB vapaana"
     (( tera_gb  <  5 )) && die "Terastationilla kriittisen vähän tilaa (${tera_gb} GB) — pysäytetään"
+
+    # Tarkista onko kesken jääneitä sessioita ennen rippauksen aloitusta
+    local pending=()
+    for d in "$OUTBASE"/session_*/; do
+        [[ -d "$d" ]] || continue
+        [[ -n "$(find "$d" -name "*.VOB" -size +10M 2>/dev/null | head -1)" ]] || continue
+        pending+=("$d")
+    done
+    if (( ${#pending[@]} > 0 )); then
+        echo ""
+        echo "  Löytyi ${#pending[@]} sessio(ta) enkoodaamattomalla datalla:"
+        for d in "${pending[@]}"; do echo "    ${d##*/}"; done
+        echo ""
+        local enc_ok=""
+        read -rp "  Käynnistetäänkö enkoodaus taustalle? (k/e): " enc_ok </dev/tty
+        if [[ "$enc_ok" == "k" ]]; then
+            for d in "${pending[@]}"; do
+                local sname; sname="enc-$(basename "$d" | sed 's/session_//')"
+                if tmux has-session -t "$sname" 2>/dev/null; then
+                    log "  $sname on jo käynnissä — ohitetaan"
+                else
+                    tmux new-session -d -s "$sname" "bash /usr/local/bin/rip-dvd.sh --encode-only '$d'"
+                    log "  Käynnistettiin enkoodaussessio: $sname"
+                fi
+            done
+            echo ""
+        fi
+    fi
 
     # Session-hakemisto: yksi sessio = yksi käyttökerta (useita levyjä)
     local session_dir="${OUTBASE}/session_$(date +%Y%m%d_%H%M%S)"
