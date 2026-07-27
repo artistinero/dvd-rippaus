@@ -423,7 +423,7 @@ print(max(n)+1 if n else 1)" 2>/dev/null || echo 1)
         ep="${ep:-$suggest}"
         [[ "$ep" =~ ^[0-9]+$ ]] || { echo "  Jaksonumero ei kelpaa: '$ep'" >&2; return 1; }
         local max_ep=""
-        read -rp "Montako jaksoa levyllä (Enter = kaikki): " max_ep
+        read -rp "Montako jaksoa levyllä (Enter = kysy rippauksen jälkeen): " max_ep
         if [[ -n "$max_ep" ]]; then
             [[ "$max_ep" =~ ^[0-9]+$ ]] || { echo "  Ei kelpaa: '$max_ep'" >&2; return 1; }
         fi
@@ -1061,20 +1061,61 @@ for u, d in [('G', 1024**3), ('M', 1024**2)]:
             echo "READ_ERRORS=${read_errors}" >> "${raw_dir}/meta.conf"
         fi
 
-        # Skannaa raitalukumäärä HandBrakella — tallennetaan meta.conf:iin TITLE_COUNT:ksi.
-        # Enkoodausvaiheessa verrataan tähän ja varoitetaan jos poikkeama (levy saattanut muuttua).
+        # Skannaa raidat HandBrakella — näytä kestot ja kysy MAX_EPISODES jos ei vielä tiedetä.
         log "dvdbackup onnistui (${vob_count} VOB). Skannataan raidat..."
         local dvd_inner; dvd_inner=$(find "$dv_dir" -mindepth 1 -maxdepth 1 -type d | head -1)
-        local title_count
-        title_count=$(hb_scan_long_titles "$dvd_inner" | wc -l)
-        log "Levy ${disc_num} ripattuna (${title_count} raitaa)."
+        local scan_result
+        scan_result=$(HandBrakeCLI -i "$dvd_inner" -t 0 --scan </dev/null 2>&1 | python3 -c "
+import sys, re
+min_dur = $MIN_DURATION
+cur = None
+for line in sys.stdin.buffer:
+    line = line.decode('utf-8', errors='replace')
+    m = re.search(r'scan: scanning title (\d+)', line)
+    if m: cur = int(m.group(1))
+    m2 = re.search(r'scan: duration is (\d+):(\d+):(\d+)', line)
+    if m2 and cur is not None:
+        h,mn,s = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
+        if h*3600 + mn*60 + s >= min_dur:
+            print(f'{cur}\t{h:02d}:{mn:02d}:{s:02d}')
+        cur = None
+")
+        local title_count; title_count=$(echo "$scan_result" | grep -c . || echo 0)
+
+        echo ""
+        echo "  Raidat levyllä:"
+        while IFS=$'\t' read -r tnum tdur; do
+            printf '    Raita %s: %s\n' "$tnum" "$tdur"
+        done <<< "$scan_result"
+        echo ""
+
+        # Jos MAX_EPISODES ei ole vielä asetettu, kysy nyt kun tiedot näkyvissä
+        if [[ -z "$p_max_ep" ]] && (( title_count > 0 )); then
+            local asked_max=""
+            read -rp "  Montako jaksoa (Enter = kaikki ${title_count}): " asked_max </dev/tty
+            if [[ -n "$asked_max" ]]; then
+                if [[ "$asked_max" =~ ^[0-9]+$ ]]; then
+                    p_max_ep="$asked_max"
+                    echo "MAX_EPISODES=${p_max_ep}" >> "${raw_dir}/meta.conf"
+                else
+                    echo "  Ei kelpaa, ohitetaan" >&2
+                fi
+            fi
+        fi
+
+        log "Levy ${disc_num} ripattuna (${title_count} raitaa${p_max_ep:+, MAX_EPISODES=${p_max_ep}})."
         echo "TITLE_COUNT=${title_count}" >> "${raw_dir}/meta.conf"
 
         eject "$disc_dev" 2>/dev/null || true
 
-        # Päivitä jaksonumero seuraavaa levyä varten (session-laskuri)
+        # Päivitä jaksonumero seuraavaa levyä varten: käytä efektiivistä jaksomäärää
         if [[ "$p_type" == series ]] && (( title_count > 0 )); then
-            p_ep=$(( p_ep + title_count ))
+            local effective_count=$title_count
+            if [[ -n "$p_max_ep" ]] && (( p_max_ep > 0 && p_max_ep < title_count )); then
+                effective_count=$p_max_ep
+            fi
+            p_ep=$(( p_ep + effective_count ))
+            p_max_ep=""  # Nollaa seuraavaa levyä varten
         fi
     done
 
