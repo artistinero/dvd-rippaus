@@ -798,22 +798,6 @@ main() {
     mkdir -p "$OUTBASE"
     log "═══ DVD-rippaus käynnistyy ═══"
 
-    # Varmista riippuvuudet ennen kuin käyttäjä syöttää levyjä
-    ensure_terastation || die "Terastation ei saatu mountattua"
-    command -v HandBrakeCLI &>/dev/null || die "HandBrakeCLI ei löydy"
-    command -v dvdbackup   &>/dev/null || die "dvdbackup ei löydy — asenna: apt install dvdbackup"
-
-    # Levytilan tarkistus — yksi levy vie ~7 GB väliaikaiset tiedostot mukaan lukien
-    ensure_terastation || die "Terastation ei saatu mountattua"
-    local local_gb tera_gb
-    local_gb=$(df "$OUTBASE" | awk 'NR==2 {printf "%d", $4/1024/1024}')
-    tera_gb=$(df "$DEST_ROOT" | awk 'NR==2 {printf "%d", $4/1024/1024}')
-    log "Tilaa: brainbin ${local_gb} GB vapaana, terastation ${tera_gb} GB vapaana"
-    (( local_gb < 14 )) && log "VAROITUS: Brainbinillä vain ${local_gb} GB — tilaa ehkä vain yhdelle levylle"
-    (( local_gb <  8 )) && die "Brainbinillä ei riitä tilaa (${local_gb} GB) �� pysäytetään"
-    (( tera_gb  < 20 )) && log "VAROITUS: Terastationilla vain ${tera_gb} GB vapaana"
-    (( tera_gb  <  5 )) && die "Terastationilla kriittisen vähän tilaa (${tera_gb} GB) — pysäytetään"
-
     # Tarkista onko sessioita — käynnissä tai odottavia
     local running_enc=() pending=()
     for d in "$OUTBASE"/session_*/; do
@@ -861,6 +845,20 @@ main() {
             echo ""
         fi
     fi
+
+    # Varmista riippuvuudet ja levytila — vasta enkoodaustilanteen näyttämisen jälkeen
+    ensure_terastation || die "Terastation ei saatu mountattua"
+    command -v HandBrakeCLI &>/dev/null || die "HandBrakeCLI ei löydy"
+    command -v dvdbackup   &>/dev/null || die "dvdbackup ei löydy — asenna: apt install dvdbackup"
+
+    local local_gb tera_gb
+    local_gb=$(df "$OUTBASE" | awk 'NR==2 {printf "%d", $4/1024/1024}')
+    tera_gb=$(df "$DEST_ROOT" | awk 'NR==2 {printf "%d", $4/1024/1024}')
+    log "Tilaa: brainbin ${local_gb} GB vapaana, terastation ${tera_gb} GB vapaana"
+    (( local_gb < 14 )) && log "VAROITUS: Brainbinillä vain ${local_gb} GB — tilaa ehkä vain yhdelle levylle"
+    (( local_gb <  8 )) && die "Brainbinillä ei riitä tilaa (${local_gb} GB) — pysäytetään"
+    (( tera_gb  < 20 )) && log "VAROITUS: Terastationilla vain ${tera_gb} GB vapaana"
+    (( tera_gb  <  5 )) && die "Terastationilla kriittisen vähän tilaa (${tera_gb} GB) — pysäytetään"
 
     # Session-hakemisto: yksi sessio = yksi käyttökerta (useita levyjä)
     local session_dir="${OUTBASE}/session_$(date +%Y%m%d_%H%M%S)"
