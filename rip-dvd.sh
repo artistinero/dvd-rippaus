@@ -1196,8 +1196,10 @@ for line in sys.stdin.buffer:
     show_enc_status
     echo ""
     echo "══════════════════════════════════════════════"
-    printf '  %d levy/levyä ripattuna. Aloitetaan enkoodaus...\n' "$disc_num"
+    printf '  %d levy/levyä ripattuna.\n' "$disc_num"
     echo "══════════════════════════════════════════════"
+    echo ""
+    read -rp "  [Paina Enter aloittaaksesi enkoodauksen — Ctrl+C poistuaksesi]" < /dev/tty
     echo ""
 
     encode_session "$session_dir"
