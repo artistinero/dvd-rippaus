@@ -475,7 +475,9 @@ encode_session() {
     # Tulos: kaksi HandBrakeCLI-instanssia yhtä aikaa → CPU 100°C.
     exec 9>"$ENCODE_LOCKFILE"
     if ! flock -n 9; then
-        die "Enkoodaus on jo käynnissä toisessa sessiossa (lukko: $ENCODE_LOCKFILE). Odota tai tarkista tmux ls."
+        log "  Enkoodausvuoro jonossa — odotetaan edellisen session valmistumista..."
+        flock 9
+        log "  Lukko saatu — aloitetaan enkoodaus"
     fi
     # fd 9 pysyy auki koko encode_session:n ajan. Lukko vapautuu automaattisesti
     # kun skripti päättyy (normaalisti tai virheeseen) koska fd sulkeutuu.
