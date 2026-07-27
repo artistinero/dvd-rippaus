@@ -514,29 +514,31 @@ encode_session() {
         while IFS= read -r t; do titles+=("$t"); done < <(hb_scan_long_titles "$dvd_dir")
         (( ${#titles[@]} == 0 )) && { log "VAROITUS: ei enkoodattavia raitoja — ${raw_dir##*/}"; continue; }
 
-        # Rajoita MAX_EPISODES:iin jos asetettu
+        # Jaa raidat jaksoihin ja ekstraan MAX_EPISODES:in perusteella
+        local ep_titles=() extra_titles=()
         if [[ -n "$max_episodes" ]] && (( max_episodes > 0 )) && (( ${#titles[@]} > max_episodes )); then
-            log "  MAX_EPISODES=${max_episodes}: rajoitetaan ${#titles[@]} → ${max_episodes} raitaan (${raw_dir##*/})"
-            titles=("${titles[@]:0:$max_episodes}")
+            ep_titles=("${titles[@]:0:$max_episodes}")
+            extra_titles=("${titles[@]:$max_episodes}")
+            log "  MAX_EPISODES=${max_episodes}: ${#ep_titles[@]} jaksoa + ${#extra_titles[@]} ekstraa (${raw_dir##*/})"
+        else
+            ep_titles=("${titles[@]}")
         fi
 
         # Vertaa skannauksen tulosta rippausvaiheessa tallennettuun arvoon
-        if [[ -n "$expected_count" ]] && (( ${#titles[@]} != expected_count )); then
-            log "VAROITUS: odotettiin ${expected_count} raitaa, löytyi ${#titles[@]} — ${raw_dir##*/}"
+        local total_found=$(( ${#ep_titles[@]} + ${#extra_titles[@]} ))
+        if [[ -n "$expected_count" ]] && (( total_found != expected_count )); then
+            log "VAROITUS: odotettiin ${expected_count} raitaa, löytyi ${total_found} — ${raw_dir##*/}"
         fi
 
-        # Rakenna jonorivi jokaiselle raidalle
-        local i=1 total=${#titles[@]}
-        for t in "${titles[@]}"; do
+        # Rakenna jonorivi jaksoraidoille
+        local i=1 total=${#ep_titles[@]}
+        for t in "${ep_titles[@]}"; do
             local out_name
             case "$type" in
             series)
-                # Sarjat: SxxExx-nimeäminen Jellyfin-automaatintunnistusta varten
                 out_name="${name} S$(printf '%02d' "$season")E$(printf '%02d' "$ep").mkv"
                 ;;
             *)
-                # Muut: yksi tiedosto jos yksi raita, muuten "Part XX"
-                # Huom: doc/music-levyillä voi olla monta raitaa (haastattelut, bonukset)
                 (( total==1 )) && out_name="${name}.mkv" \
                                || out_name="${name} - Part $(printf '%02d' "$i").mkv"
                 ;;
@@ -545,6 +547,19 @@ encode_session() {
                 "$dvd_dir" "$out_name" "$dest" "$t" "${raw_dir##*/}" "$disc_seq" >> "$queue"
             [[ "$type" == series ]] && (( ep++ )) || true
             (( i++ )) || true
+        done
+
+        # Rakenna jonorivi ekstraraidoille
+        local extra_num=1
+        for t in "${extra_titles[@]}"; do
+            local out_name
+            case "$type" in
+            series) out_name="${name} S$(printf '%02d' "$season") Extra $(printf '%02d' "$extra_num").mkv" ;;
+            *)      out_name="${name} - Extra $(printf '%02d' "$extra_num").mkv" ;;
+            esac
+            printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+                "$dvd_dir" "$out_name" "$dest" "$t" "${raw_dir##*/}" "$disc_seq" >> "$queue"
+            (( extra_num++ )) || true
         done
         (( disc_seq++ )) || true
 
