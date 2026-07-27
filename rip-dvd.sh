@@ -395,6 +395,11 @@ print(max(n)+1 if n else 1)" 2>/dev/null || echo 1)
         read -rp "Ensimmäinen jakso tällä levyllä [$suggest]: " ep
         ep="${ep:-$suggest}"
         [[ "$ep" =~ ^[0-9]+$ ]] || { echo "  Jaksonumero ei kelpaa: '$ep'" >&2; return 1; }
+        local max_ep=""
+        read -rp "Montako jaksoa levyllä (Enter = kaikki): " max_ep
+        if [[ -n "$max_ep" ]]; then
+            [[ "$max_ep" =~ ^[0-9]+$ ]] || { echo "  Ei kelpaa: '$max_ep'" >&2; return 1; }
+        fi
         ;;
 
     movie|doc)
@@ -424,7 +429,7 @@ print(max(n)+1 if n else 1)" 2>/dev/null || echo 1)
 
     name=$(sanitize_name "$name")
     [[ -z "$name" ]] && { echo "  Nimi tyhjeni sanitoinnin jälkeen — tarkista erikoismerkit" >&2; return 1; }
-    printf '%s\x1f%s\x1f%s\x1f%s' "$type" "$name" "$val" "$ep"
+    printf '%s\x1f%s\x1f%s\x1f%s\x1f%s' "$type" "$name" "$val" "$ep" "${max_ep:-}"
 }
 
 # ── Enkoodausvaihe ───────────────────────���──────────────────────────��─────────
@@ -771,7 +776,7 @@ main() {
 
     # Edellisen levyn metatiedot oletuksina seuraavalle — käyttäjän ei tarvitse
     # kirjoittaa sarjan nimeä ja kautta uudelleen joka levylle
-    local p_type="" p_name="" p_season="" p_ep=""
+    local p_type="" p_name="" p_season="" p_ep="" p_max_ep=""
     local disc_num=0
 
     # ── Rippaussilmukka: lisää levyjä kunnes käyttäjä kirjoittaa 'q' ─────────
@@ -787,7 +792,7 @@ main() {
         # Kysy levyn metatiedot — palaa \x1F-eroteltuna merkkijonona
         local meta_str
         meta_str=$(ask_meta "$p_type" "$p_name" "$p_season" "$p_ep")
-        IFS=$'\x1f' read -r p_type p_name p_season p_ep <<< "$meta_str"
+        IFS=$'\x1f' read -r p_type p_name p_season p_ep p_max_ep <<< "$meta_str"
         [[ -z "$p_name" ]] && continue  # ask_meta palautti virhe (esim. tyhjä nimi)
 
         # Näytä yhteenveto ja pyydä vahvistus
@@ -884,6 +889,7 @@ main() {
             echo "SEASON=${p_season}"
             echo "START_EP=${p_ep}"
             echo "RIP_MODE=dvdbackup"
+            [[ -n "$p_max_ep" ]] && echo "MAX_EPISODES=${p_max_ep}"
         } > "${raw_dir}/meta.conf"
 
         log "Ripataan disc ${disc_num} dvdbackupilla (${disc_dev})..."
