@@ -410,22 +410,42 @@ ask_meta() {
         read -rp "${sp}: " val; val="${val:-$p_season}"
         [[ "$val" =~ ^[0-9]+$ ]] || { echo "  Kausiluku ei kelpaa: '$val'" >&2; return 1; }
 
-        # Ehdota seuraavaa jaksoa: jos kausi vaihtui, katso terastationilta viimeisin jakso.
-        # Jos sama kausi kuin edellinen levy, käytä session-laskurin arvoa (p_ep).
+        # Ehdota seuraavaa jaksoa: jos kausi vaihtui, katso terastation + jono.
+        # Jos sama kausi kuin edellinen levy tässä sessiossa, käytä session-laskuria.
         local suggest=1
         if [[ -n "$p_ep" && "$p_type" == series && "$p_season" == "$val" ]]; then
             suggest="$p_ep"
         else
-            local dd; dd=$(dest_path series "$name" "$val")
-            if [[ -d "$dd" ]]; then
-                suggest=$(find "$dd" -maxdepth 1 -name "*.mkv" 2>/dev/null | python3 -c "
+            # Terastation: suurin olemassaoleva jaksonumero + 1
+            local _dd; _dd=$(dest_path series "$name" "$val")
+            local _suggest_tera=0
+            if [[ -d "$_dd" ]]; then
+                _suggest_tera=$(find "$_dd" -maxdepth 1 -name "*.mkv" 2>/dev/null | python3 -c "
 import sys, re
 n = []
 for line in sys.stdin:
     m = re.search(r'E(\d+)', line.strip())
     if m: n.append(int(m.group(1)))
-print(max(n)+1 if n else 1)" 2>/dev/null || echo 1)
+print(max(n)+1 if n else 0)" 2>/dev/null || echo 0)
             fi
+            # Jono: sessiot joita ei vielä terastationilla
+            local _suggest_queue=0
+            local _qmf
+            for _qmf in "$OUTBASE"/session_*/disc-*/meta.conf; do
+                [[ -f "$_qmf" ]] || continue
+                local _qname _qseas _qep _qcount _qmax
+                _qname=$(grep '^NAME='   "$_qmf" | cut -d= -f2-)
+                _qseas=$(grep '^SEASON=' "$_qmf" | cut -d= -f2)
+                [[ "$_qname" == "$name" && "$_qseas" == "$val" ]] || continue
+                _qep=$(grep '^START_EP='    "$_qmf" | cut -d= -f2)
+                _qcount=$(grep '^TITLE_COUNT=' "$_qmf" 2>/dev/null | cut -d= -f2 || echo 0)
+                _qmax=$(grep '^MAX_EPISODES=' "$_qmf" 2>/dev/null | cut -d= -f2 || echo 0)
+                (( _qmax > 0 && _qmax < _qcount )) && _qcount=$_qmax
+                local _qend=$(( _qep + _qcount ))
+                (( _qend > _suggest_queue )) && _suggest_queue=$_qend
+            done
+            suggest=$(( _suggest_tera > _suggest_queue ? _suggest_tera : _suggest_queue ))
+            (( suggest < 1 )) && suggest=1
         fi
         read -rp "Ensimmäinen jakso tällä levyllä [$suggest]: " ep
         ep="${ep:-$suggest}"
