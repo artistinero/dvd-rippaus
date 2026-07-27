@@ -94,15 +94,23 @@ ENC_SPACE_MIN_GB=3
 # ── Apufunktiot ───────────────────────���───────────────────────────────────────
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOGFILE"; }
-die() { log "VIRHE: $*"; exit 1; }
+_wait_enter() {
+    echo "" >&2
+    echo "  Loki: $LOGFILE" >&2
+    echo "  [Paina Enter sulkeaksesi — tai odota 60s]" >&2
+    read -r < /dev/tty 2>/dev/null || sleep 60
+}
+die() {
+    log "VIRHE: $*"
+    _wait_enter
+    exit 1
+}
 _exit_trap() {
     local rc=$?
     (( rc == 0 )) && return
     echo "" >&2
-    echo "  *** Skripti kaatui (exit $rc) ***" >&2
-    echo "  Loki: $LOGFILE" >&2
-    echo "  [Paina Enter sulkeaksesi — tai odota 60s]" >&2
-    read -r < /dev/tty 2>/dev/null || sleep 60
+    echo "  *** Skripti kaatui odottamatta (exit $rc) ***" >&2
+    _wait_enter
 }
 trap _exit_trap EXIT
 
