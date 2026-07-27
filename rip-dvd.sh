@@ -829,7 +829,9 @@ main() {
         if [[ "$enc_ok" == "k" ]]; then
             for d in "${pending[@]}"; do
                 local sname; sname="enc-$(basename "$d" | sed 's/session_//')"
-                if tmux has-session -t "$sname" 2>/dev/null; then
+                if pgrep -f "encode-only.*$(basename "$d")" > /dev/null 2>&1; then
+                    log "  $(basename "$d") enkoodataan jo — ohitetaan"
+                elif tmux has-session -t "$sname" 2>/dev/null; then
                     log "  $sname on jo käynnissä — ohitetaan"
                 else
                     tmux new-session -d -s "$sname" "bash /usr/local/bin/rip-dvd.sh --encode-only '$d'"
