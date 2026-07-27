@@ -804,6 +804,45 @@ encode_session() {
     done < <(find "$session_dir" -name "meta.conf" | sort)
 }
 
+show_enc_status() {
+    local _running=()
+    for _d in "$OUTBASE"/session_*/; do
+        [[ -d "$_d" ]] || continue
+        [[ -n "$(find "$_d" -name "*.VOB" -size +10M 2>/dev/null | head -1)" ]] || continue
+        pgrep -f "encode-only.*$(basename "$_d")" > /dev/null 2>&1 || continue
+        _running+=("$_d")
+    done
+    (( ${#_running[@]} == 0 )) && return
+    echo ""
+    echo "  Enkoodaus käynnissä taustalla (${#_running[@]} sessio(ta)):"
+    declare -A _ps
+    while IFS=' ' read -r _s _p; do
+        [[ "$_s" == "dvd-rip" || "$_s" == "watchdog" ]] && continue
+        _ps["$_p"]="$_s"
+    done < <(tmux list-panes -a -F '#{session_name} #{pane_pid}' 2>/dev/null)
+    for _d in "${_running[@]}"; do
+        local _mf="$_d/disc-001/meta.conf"
+        local _n; _n=$(grep '^NAME='   "$_mf" 2>/dev/null | cut -d= -f2-)
+        local _s; _s=$(grep '^SEASON=' "$_mf" 2>/dev/null | cut -d= -f2)
+        local _lbl="${_n:-$(basename "$_d")}${_s:+ S${_s}}"
+        local _st="jonossa"
+        local _pid; _pid=$(pgrep -f "encode-only.*$(basename "$_d")" 2>/dev/null | head -1)
+        if [[ -n "$_pid" ]]; then
+            local _pp; _pp=$(ps -o ppid= -p "$_pid" 2>/dev/null | tr -d ' ')
+            local _sess="${_ps[$_pp]:-}"
+            if [[ -n "$_sess" ]]; then
+                local _pst
+                _pst=$(tmux capture-pane -t "$_sess" -p 2>/dev/null \
+                    | grep -oE '\[.+\] [0-9]+\.[0-9]+%.*ETA [0-9hms]+|jonossa — odotetaan.*' \
+                    | tail -1 | sed 's/^[[:space:]]*//')
+                [[ -n "$_pst" ]] && _st="$_pst"
+            fi
+        fi
+        printf '    %-25s %s\n' "${_lbl}:" "$_st"
+    done
+    unset _ps
+}
+
 # ── Pääohjelma ──────────��─────────────────────────────────────────────────────
 
 main() {
@@ -837,41 +876,7 @@ main() {
             pending+=("$d")
         fi
     done
-    if (( ${#running_enc[@]} > 0 )); then
-        echo ""
-        echo "  Enkoodaus käynnissä taustalla (${#running_enc[@]} sessio(ta)):"
-        # Rakennetaan pane_pid → tmux-sessio -hakutaulukko
-        declare -A _pane_sess
-        while IFS=' ' read -r _s _p; do
-            [[ "$_s" == "dvd-rip" || "$_s" == "watchdog" ]] && continue
-            _pane_sess["$_p"]="$_s"
-        done < <(tmux list-panes -a -F '#{session_name} #{pane_pid}' 2>/dev/null)
-
-        for d in "${running_enc[@]}"; do
-            # Nimi meta.confista
-            local _mf="$d/disc-001/meta.conf"
-            local _mname; _mname=$(grep '^NAME='   "$_mf" 2>/dev/null | cut -d= -f2-)
-            local _mseas;  _mseas=$(grep '^SEASON=' "$_mf" 2>/dev/null | cut -d= -f2)
-            local _label="${_mname:-$(basename "$d")}${_mseas:+ S${_mseas}}"
-
-            # Etsi tmux-sessio PID:n kautta
-            local _status="jonossa"
-            local _spid; _spid=$(pgrep -f "encode-only.*$(basename "$d")" 2>/dev/null | head -1)
-            if [[ -n "$_spid" ]]; then
-                local _ppid; _ppid=$(ps -o ppid= -p "$_spid" 2>/dev/null | tr -d ' ')
-                local _sess="${_pane_sess[$_ppid]:-}"
-                if [[ -n "$_sess" ]]; then
-                    local _ps
-                    _ps=$(tmux capture-pane -t "$_sess" -p 2>/dev/null \
-                        | grep -oE '\[.+\] [0-9]+\.[0-9]+%.*ETA [0-9hms]+|jonossa — odotetaan.*' \
-                        | tail -1 | sed 's/^[[:space:]]*//')
-                    [[ -n "$_ps" ]] && _status="$_ps"
-                fi
-            fi
-            printf '    %-25s %s\n' "${_label}:" "$_status"
-        done
-        unset _pane_sess
-    fi
+    show_enc_status
     if (( ${#pending[@]} > 0 )); then
         echo ""
         echo "  Löytyi ${#pending[@]} sessio(ta) enkoodaamattomalla datalla:"
@@ -1188,8 +1193,9 @@ for line in sys.stdin.buffer:
         log "Ei levyjä ripattuna."; exit 0
     fi
 
+    show_enc_status
     echo ""
-    echo "═══════════════════════════���══════════════════"
+    echo "══════════════════════════════════════════════"
     printf '  %d levy/levyä ripattuna. Aloitetaan enkoodaus...\n' "$disc_num"
     echo "══════════════════════════════════════════════"
     echo ""
