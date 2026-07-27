@@ -209,6 +209,23 @@ ensure_terastation() {
     return 1
 }
 
+# Odottaa terastationia enintään max_secs sekuntia, yrittäen mountata 30s välein.
+# Käytetään boottauksen jälkeen kun verkko tai NAS ei ole vielä valmis.
+wait_for_terastation() {
+    local max_secs="${1:-300}"
+    local interval=30
+    local elapsed=0
+    ensure_terastation && return 0
+    log "Terastation ei vielä saatavilla — odotetaan enintään $(( max_secs/60 )) min..."
+    while (( elapsed < max_secs )); do
+        sleep "$interval"
+        (( elapsed += interval )) || true
+        log "  Yritetään terastationia uudelleen (${elapsed}/${max_secs}s)..."
+        ensure_terastation && return 0
+    done
+    return 1
+}
+
 # Ajaa HandBrakeCLI:n ja näyttää reaaliaikaisen edistymisprosentin.
 # Parametrit:
 #   $1 = lähde (dvdbackup-hakemisto tai MKV-tiedosto)
@@ -519,7 +536,7 @@ encode_session() {
     # ── Levytilan tarkistus enkoodauksen alussa ──────────��────────────────────
     # Enkoodaus voi kestää tunteja — varmista ennen aloitusta että tilaa riittää.
     # df antaa väärän tuloksen jos terastation ei ole mountattu — varmista ensin.
-    ensure_terastation || die "Terastation ei saatu mountattua enkoodauksen alussa"
+    wait_for_terastation 600 || die "Terastation ei saatu mountattua 10 minuutin odotuksessa"
     local local_gb tera_gb
     local_gb=$(df "$OUTBASE" | awk 'NR==2 {printf "%d", $4/1024/1024}')
     tera_gb=$(df "$DEST_ROOT" | awk 'NR==2 {printf "%d", $4/1024/1024}')

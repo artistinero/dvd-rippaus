@@ -1,0 +1,20 @@
+[Unit]
+Description=DVD Encode Recovery after reboot
+# network.target: verkkorajapinnat ylhäällä — NAS ei vielä välttämättä mountattu,
+# mutta recovery-skripti odottaa terastationia itse (jopa 10 min).
+After=network.target local-fs.target
+
+[Service]
+Type=oneshot
+User=keitsi
+# Skripti käynnistää tmux-sessiot ja palaa — RemainAfterExit näyttää servicen
+# "active" tilassa vaikka oneshot-prosessi on jo päättynyt.
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/dvd-encode-recovery.sh
+# Systemd ei aja tätä uudelleen jos epäonnistuu — recovery-skripti itse käsittelee virheet
+Restart=no
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
