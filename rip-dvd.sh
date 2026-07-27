@@ -814,14 +814,22 @@ main() {
     (( tera_gb  < 20 )) && log "VAROITUS: Terastationilla vain ${tera_gb} GB vapaana"
     (( tera_gb  <  5 )) && die "Terastationilla kriittisen vähän tilaa (${tera_gb} GB) — pysäytetään"
 
-    # Tarkista onko kesken jääneitä sessioita ennen rippauksen aloitusta
-    local pending=()
+    # Tarkista onko sessioita — käynnissä tai odottavia
+    local running_enc=() pending=()
     for d in "$OUTBASE"/session_*/; do
         [[ -d "$d" ]] || continue
         [[ -n "$(find "$d" -name "*.VOB" -size +10M 2>/dev/null | head -1)" ]] || continue
-        pgrep -f "encode-only.*$(basename "$d")" > /dev/null 2>&1 && continue
-        pending+=("$d")
+        if pgrep -f "encode-only.*$(basename "$d")" > /dev/null 2>&1; then
+            running_enc+=("$d")
+        else
+            pending+=("$d")
+        fi
     done
+    if (( ${#running_enc[@]} > 0 )); then
+        echo ""
+        echo "  Enkoodaus käynnissä taustalla (${#running_enc[@]} sessio(ta)):"
+        for d in "${running_enc[@]}"; do echo "    ${d##*/}"; done
+    fi
     if (( ${#pending[@]} > 0 )); then
         echo ""
         echo "  Löytyi ${#pending[@]} sessio(ta) enkoodaamattomalla datalla:"
