@@ -820,16 +820,37 @@ main() {
     if (( ${#running_enc[@]} > 0 )); then
         echo ""
         echo "  Enkoodaus käynnissä taustalla (${#running_enc[@]} sessio(ta)):"
-        while IFS= read -r sess; do
-            [[ "$sess" == "dvd-rip" || "$sess" == "watchdog" ]] && continue
-            local status
-            status=$(tmux capture-pane -t "$sess" -p 2>/dev/null \
-                | grep -oE '\[.+\] [0-9]+\.[0-9]+%.*ETA [0-9hms]+|jonossa — odotetaan.*|Enkoodataan \([0-9]+/[0-9]+\).*' \
-                | tail -1 \
-                | sed 's/^[[:space:]]*//')
-            [[ -z "$status" ]] && status="(odottaa...)"
-            printf '    %-26s %s\n' "${sess}:" "$status"
-        done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+        # Rakennetaan pane_pid → tmux-sessio -hakutaulukko
+        declare -A _pane_sess
+        while IFS=' ' read -r _s _p; do
+            [[ "$_s" == "dvd-rip" || "$_s" == "watchdog" ]] && continue
+            _pane_sess["$_p"]="$_s"
+        done < <(tmux list-panes -a -F '#{session_name} #{pane_pid}' 2>/dev/null)
+
+        for d in "${running_enc[@]}"; do
+            # Nimi meta.confista
+            local _mf="$d/disc-001/meta.conf"
+            local _mname; _mname=$(grep '^NAME='   "$_mf" 2>/dev/null | cut -d= -f2-)
+            local _mseas;  _mseas=$(grep '^SEASON=' "$_mf" 2>/dev/null | cut -d= -f2)
+            local _label="${_mname:-$(basename "$d")}${_mseas:+ S${_mseas}}"
+
+            # Etsi tmux-sessio PID:n kautta
+            local _status="jonossa"
+            local _spid; _spid=$(pgrep -f "encode-only.*$(basename "$d")" 2>/dev/null | head -1)
+            if [[ -n "$_spid" ]]; then
+                local _ppid; _ppid=$(ps -o ppid= -p "$_spid" 2>/dev/null | tr -d ' ')
+                local _sess="${_pane_sess[$_ppid]:-}"
+                if [[ -n "$_sess" ]]; then
+                    local _ps
+                    _ps=$(tmux capture-pane -t "$_sess" -p 2>/dev/null \
+                        | grep -oE '\[.+\] [0-9]+\.[0-9]+%.*ETA [0-9hms]+|jonossa — odotetaan.*' \
+                        | tail -1 | sed 's/^[[:space:]]*//')
+                    [[ -n "$_ps" ]] && _status="$_ps"
+                fi
+            fi
+            printf '    %-25s %s\n' "${_label}:" "$_status"
+        done
+        unset _pane_sess
     fi
     if (( ${#pending[@]} > 0 )); then
         echo ""
@@ -935,13 +956,13 @@ main() {
             fi
         fi
 
-        # ── Session-sisäinen päällekkäisyystarkistus ─────────────────────────
-        # Varoittaa jos tämän session aiempi levy kattaa samat jaksot.
-        # Tämä tapahtuu helposti kun DVD:t menevät hieman päällekkäin (esim. Wire S04:
-        # disc-005 loppuu E04:een ja disc-006 alkaa E04:stä).
+        # ── Päällekkäisyystarkistus: tämä sessio + kaikki jonossa olevat ────────
+        # Varoittaa jos jokin aiempi levy (tässä tai toisessa sessiossa) kattaa
+        # samat jaksot — myös jos ne ovat vain jonossa eivätkä vielä terastationilla.
         if [[ "$p_type" == series ]]; then
             local prev_mf
-            for prev_mf in "${session_dir}"/disc-*/meta.conf; do
+            for prev_mf in "${session_dir}"/disc-*/meta.conf \
+                           "$OUTBASE"/session_*/disc-*/meta.conf; do
                 [[ -f "$prev_mf" ]] || continue
                 local prev_name prev_season prev_ep prev_count
                 prev_name=$(grep '^NAME=' "$prev_mf" | cut -d= -f2-)
