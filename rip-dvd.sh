@@ -512,6 +512,10 @@ encode_session() {
 
     log "═══ Enkoodausvaihe alkaa ═══"
 
+    # Poista kesken jääneet .tmp-tiedostot — virransyötön tai kaatumisen jäänne.
+    # Ilman tätä ne jäisivät ikuisesti enc_dir:iin tilaa viemään.
+    find "$session_dir" -name "*.mkv.tmp" -delete 2>/dev/null || true
+
     # ── Levytilan tarkistus enkoodauksen alussa ──────────��────────────────────
     # Enkoodaus voi kestää tunteja — varmista ennen aloitusta että tilaa riittää.
     # df antaa väärän tuloksen jos terastation ei ole mountattu — varmista ensin.
@@ -694,7 +698,7 @@ encode_session() {
             rm -f "$_enc_out"
         else
             # Siivoa mahdollinen vajaa/vioittunut enc_dir-tiedosto
-            rm -f "${enc_dir}/${out_name}"
+            rm -f "${enc_dir}/${out_name}" "${enc_dir}/${out_name}.tmp"
         fi
 
         # ── Edistymisraportti ─────────────────────────────────────────────────
@@ -716,7 +720,7 @@ encode_session() {
 
         # ── Enkoodaus ─────────────────────────────────────────────────────────
         local t_start; t_start=$(date +%s)
-        local out="${enc_dir}/${out_name}"
+        local out="${enc_dir}/${out_name}.tmp"
 
         # Luo kohdepolku terastationilla — retry jos verkko katkaisi
         if ! mkdir -p "$dest"; then
@@ -741,15 +745,18 @@ encode_session() {
         local t_secs=$(( $(date +%s) - t_start ))
         if (( rc == 0 )) && [[ -s "$out" ]]; then
             local sz; sz=$(du -sh "$out" | cut -f1)
-            # Siirrä terastationille — retry jos verkko katkaisi enkoodauksen aikana
-            if mv "$out" "${dest}/"; then
+            local final="${enc_dir}/${out_name}"
+            # Atominen .tmp→final: varmistaa että kesken jäänyt enkoodaus ei jää
+            # terastationille osittaisena tiedostona virransyötön tai kaatumisen jälkeen.
+            mv "$out" "$final"
+            if mv "$final" "${dest}/"; then
                 log "  ✓ ${out_name} (${sz}, $(fmt_time "$t_secs"))"
             else
                 log "  Siirto epäonnistui — yritetään remountata..."
-                if ensure_terastation && mkdir -p "$dest" && mv "$out" "${dest}/"; then
+                if ensure_terastation && mkdir -p "$dest" && mv "$final" "${dest}/"; then
                     log "  ✓ ${out_name} (${sz}, $(fmt_time "$t_secs")) [siirto onnistui remountin jälkeen]"
                 else
-                    log "  VIRHE: siirto terastationille epäonnistui — ${out_name} jäi: ${out}"
+                    log "  VIRHE: siirto terastationille epäonnistui — ${out_name} jäi: ${final}"
                     log "         Aja --encode-only kun terastation on taas saatavilla (tiedosto enkoodataan uudelleen)"
                 fi
             fi
