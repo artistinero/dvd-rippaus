@@ -819,6 +819,7 @@ main() {
     for d in "$OUTBASE"/session_*/; do
         [[ -d "$d" ]] || continue
         [[ -n "$(find "$d" -name "*.VOB" -size +10M 2>/dev/null | head -1)" ]] || continue
+        pgrep -f "encode-only.*$(basename "$d")" > /dev/null 2>&1 && continue
         pending+=("$d")
     done
     if (( ${#pending[@]} > 0 )); then
