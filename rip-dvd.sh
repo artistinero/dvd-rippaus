@@ -828,7 +828,16 @@ main() {
     if (( ${#running_enc[@]} > 0 )); then
         echo ""
         echo "  Enkoodaus käynnissä taustalla (${#running_enc[@]} sessio(ta)):"
-        for d in "${running_enc[@]}"; do echo "    ${d##*/}"; done
+        while IFS= read -r sess; do
+            [[ "$sess" == "dvd-rip" || "$sess" == "watchdog" ]] && continue
+            local status
+            status=$(tmux capture-pane -t "$sess" -p 2>/dev/null \
+                | grep -oE '\[.+\] [0-9]+\.[0-9]+%.*ETA [0-9hms]+|jonossa — odotetaan.*|Enkoodataan \([0-9]+/[0-9]+\).*' \
+                | tail -1 \
+                | sed 's/^[[:space:]]*//')
+            [[ -z "$status" ]] && status="(odottaa...)"
+            printf '    %-26s %s\n' "${sess}:" "$status"
+        done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
     fi
     if (( ${#pending[@]} > 0 )); then
         echo ""
