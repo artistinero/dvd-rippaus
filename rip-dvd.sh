@@ -62,7 +62,8 @@ fi
 # ── Globaalit muuttujat ───────────────────��───────────────────────────────────
 OUTBASE="/home/keitsi/dvd-rip-tmp"          # Rippauksen väliaikaiset tiedostot
 DEST_ROOT="/mnt/terastation/dlna/vids"       # Kohdehakemisto terastationilla
-LOGFILE="/home/keitsi/rip-dvd.log"           # Lokitiedosto (liitetään, ei ylikirjoiteta)
+LOGFILE="/home/keitsi/logs/rip-dvd.log"       # Lokitiedosto (liitetään, ei ylikirjoiteta)
+mkdir -p "$(dirname "$LOGFILE")"
 
 # Lämpötilavalvonta (yksikkö: °C)
 # TEMP_WARN:   HandBrakeCLI pysäytetään (SIGSTOP) kun tämä ylittyy
