@@ -371,8 +371,8 @@ dest_path() {
     series)  printf '%s/series/%s/Season %02d' "$DEST_ROOT" "$name" "$val" ;;
     movie)   printf '%s/movies/%s (%s)'        "$DEST_ROOT" "$name" "$val" ;;
     doc)     printf '%s/documentaries/%s (%s)' "$DEST_ROOT" "$name" "$val" ;;
-    music)   printf '%s/Music videos/%s'       "$DEST_ROOT" "$name" ;;
-    misc)    printf '%s/misc/%s'               "$DEST_ROOT" "$name" ;;
+    music)   printf '%s/music/%s'              "$DEST_ROOT" "$name" ;;
+    misc)    printf '%s/movies/%s'             "$DEST_ROOT" "$name" ;;
     esac
 }
 
@@ -628,7 +628,17 @@ encode_session() {
         done
 
         # Rakenna jonorivi ekstraraidoille
-        local extra_num=1
+        # extra_num lasketaan terastationin olemassa olevista + jo jonossa olevista,
+        # jotta extrat numeroituvat oikein eri sessioiden välillä.
+        local _epat _n_tera _n_queue extra_num
+        if [[ "$type" == series ]]; then
+            _epat="${name} S$(printf '%02d' "$season") Extra"
+        else
+            _epat="${name} - Extra"
+        fi
+        _n_tera=$(find "$dest" -maxdepth 1 -name "${_epat} [0-9]*.mkv" 2>/dev/null | wc -l)
+        _n_queue=$(grep -cF "${_epat}" "$queue" 2>/dev/null || true)
+        extra_num=$(( _n_tera + _n_queue + 1 ))
         for t in "${extra_titles[@]}"; do
             local out_name
             case "$type" in
@@ -802,9 +812,9 @@ encode_session() {
     while IFS=$'\x1f' read -r _src _out _dest _t _l _n; do
         # Alusta avain "yes" ensimmäisellä kohdauksella
         [[ -z "${_src_ok[$_src]+x}" ]] && _src_ok["$_src"]="yes"
-        # Jos raita puuttuu tai on liian pieni, merkitse lähde säilytettäväksi
+        # Jos raita puuttuu tai on täysin tyhjä, merkitse lähde säilytettäväksi
         if ! [[ -f "${_dest}/${_out}" ]] || \
-           (( $(stat -c%s "${_dest}/${_out}" 2>/dev/null || echo 0) <= 1048576 )); then
+           (( $(stat -c%s "${_dest}/${_out}" 2>/dev/null || echo 0) == 0 )); then
             _src_ok["$_src"]="no"
         fi
     done < "$queue"
@@ -845,10 +855,35 @@ show_enc_status() {
         _ps["$_p"]="$_s"
     done < <(tmux list-panes -a -F '#{session_name} #{pane_pid}' 2>/dev/null)
     for _d in "${_running[@]}"; do
-        local _mf="$_d/disc-001/meta.conf"
-        local _n; _n=$(grep '^NAME='   "$_mf" 2>/dev/null | cut -d= -f2-)
-        local _s; _s=$(grep '^SEASON=' "$_mf" 2>/dev/null | cut -d= -f2)
-        local _lbl="${_n:-$(basename "$_d")}${_s:+ S${_s}}"
+        # Skannaa kaikki levyt sessiossa nimen, kauden ja jaksovälin selvittämiseksi
+        local _n="" _season="" _ep_start="" _ep_end="" _disc_count=0
+        for _dmf in "$_d"disc-*/meta.conf; do
+            [[ -f "$_dmf" ]] || continue
+            local _dt; _dt=$(grep '^TYPE='    "$_dmf" 2>/dev/null | cut -d= -f2)
+            local _dn; _dn=$(grep '^NAME='    "$_dmf" 2>/dev/null | cut -d= -f2-)
+            local _ds; _ds=$(grep '^SEASON='  "$_dmf" 2>/dev/null | cut -d= -f2)
+            [[ -z "$_n" && -n "$_dn" ]] && { _n="$_dn"; _season="$_ds"; }
+            [[ "$_dt" == "series" ]] || continue
+            (( _disc_count++ )) || true
+            local _dep;  _dep=$(grep  '^START_EP='     "$_dmf" 2>/dev/null | cut -d= -f2)
+            local _dcnt; _dcnt=$(grep '^TITLE_COUNT='  "$_dmf" 2>/dev/null | cut -d= -f2)
+            local _dmax; _dmax=$(grep '^MAX_EPISODES=' "$_dmf" 2>/dev/null | cut -d= -f2)
+            [[ -n "$_dmax" && -n "$_dcnt" ]] && (( _dmax > 0 && _dcnt > _dmax )) && _dcnt=$_dmax
+            [[ -z "$_dep" || -z "$_dcnt" ]] && continue
+            [[ -z "$_ep_start" || "$_dep" -lt "$_ep_start" ]] && _ep_start=$_dep
+            local _dend=$(( _dep + _dcnt - 1 ))
+            [[ -z "$_ep_end" || "$_dend" -gt "$_ep_end" ]] && _ep_end=$_dend
+        done
+        local _ep_lbl=""
+        if [[ -n "$_ep_start" && -n "$_ep_end" ]]; then
+            if (( _ep_start == _ep_end )); then
+                _ep_lbl=" E$(printf '%02d' "$_ep_start")"
+            else
+                _ep_lbl=" E$(printf '%02d' "$_ep_start")-E$(printf '%02d' "$_ep_end")"
+            fi
+            (( _disc_count > 1 )) && _ep_lbl+=" (${_disc_count} levyä)"
+        fi
+        local _lbl="${_n:-$(basename "$_d")}${_season:+ S${_season}}${_ep_lbl}"
         local _st="jonossa"
         local _pid; _pid=$(pgrep -f "encode-only.*$(basename "$_d")" 2>/dev/null | head -1)
         if [[ -n "$_pid" ]]; then
@@ -862,7 +897,7 @@ show_enc_status() {
                 [[ -n "$_pst" ]] && _st="$_pst"
             fi
         fi
-        printf '    %-25s %s\n' "${_lbl}:" "$_st"
+        printf '    %-36s %s\n' "${_lbl}:" "$_st"
     done
     unset _ps
 }
