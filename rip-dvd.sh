@@ -948,11 +948,12 @@ show_enc_status() {
             # Laske jäljellä olevat raidat .queue-tiedostosta
             local _q="${_d}.queue"
             local _total_q=0 _done_q=0
+            local _qsrc="" _qoname="" _qdst="" _qtnum="" _qdlbl="" _qdseq=""
             if [[ -f "$_q" ]]; then
                 _total_q=$(wc -l < "$_q")
-                while IFS=$'\x1f' read -r _src _oname _dst _tnum _dlbl _dseq; do
-                    [[ -f "${_dst}/${_oname}" ]] && \
-                    [[ $(stat -c%s "${_dst}/${_oname}" 2>/dev/null || echo 0) -gt 1048576 ]] && \
+                while IFS=$'\x1f' read -r _qsrc _qoname _qdst _qtnum _qdlbl _qdseq; do
+                    [[ -f "${_qdst}/${_qoname}" ]] && \
+                    [[ $(stat -c%s "${_qdst}/${_qoname}" 2>/dev/null || echo 0) -gt 1048576 ]] && \
                     (( _done_q++ )) || true
                 done < "$_q"
             fi
@@ -970,6 +971,9 @@ show_enc_status() {
                 _session_eta=$_hb_eta_secs
             elif (( _remaining > 0 && _per_secs > 0 )); then
                 _session_eta=$(( _remaining * _per_secs ))
+            else
+                # .queue ei vielä olemassa (odottaa flock-lukkoa) — laske VOB-koosta
+                _session_eta=$(awk "BEGIN {print int(${_vob_gb}/${ENCODE_SPEED_GB_PER_HOUR}*3600)}")
             fi
         else
             # Jonossa: arvio pelkästä VOB-koosta
