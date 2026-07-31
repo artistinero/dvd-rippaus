@@ -752,6 +752,7 @@ encode_session() {
         # ── Enkoodaus ─────────────────────────────────────────────────────────
         local t_start; t_start=$(date +%s)
         local out="${enc_dir}/${out_name}.tmp"
+        local src_sz; src_sz=$(du -sh "$src" 2>/dev/null | cut -f1 || echo "?")
 
         # Luo kohdepolku terastationilla — retry jos verkko katkaisi
         if ! mkdir -p "$dest"; then
@@ -781,11 +782,11 @@ encode_session() {
             # terastationille osittaisena tiedostona virransyötön tai kaatumisen jälkeen.
             mv "$out" "$final"
             if mv "$final" "${dest}/"; then
-                log "  ✓ ${out_name} (${sz}, $(fmt_time "$t_secs"))"
+                log "  ✓ ${out_name} (${sz}, $(fmt_time "$t_secs"), lähde: ${src_sz})"
             else
                 log "  Siirto epäonnistui — yritetään remountata..."
                 if ensure_terastation && mkdir -p "$dest" && mv "$final" "${dest}/"; then
-                    log "  ✓ ${out_name} (${sz}, $(fmt_time "$t_secs")) [siirto onnistui remountin jälkeen]"
+                    log "  ✓ ${out_name} (${sz}, $(fmt_time "$t_secs"), lähde: ${src_sz}) [siirto onnistui remountin jälkeen]"
                 else
                     log "  VIRHE: siirto terastationille epäonnistui — ${out_name} jäi: ${final}"
                     log "         Aja --encode-only kun terastation on taas saatavilla (tiedosto enkoodataan uudelleen)"
