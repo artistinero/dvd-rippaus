@@ -1352,12 +1352,12 @@ for line in sys.stdin.buffer:
         log "Ei levyjä ripattuna."; exit 0
     fi
 
-    show_enc_status
-    echo ""
     printf '  %d levy/levyä ripattuna — käynnistetään enkoodaus taustalle.\n' "$disc_num"
     local enc_sname; enc_sname="enc-$(basename "$session_dir" | sed 's/session_//')"
     tmux new-session -d -s "$enc_sname" "bash /usr/local/bin/rip-dvd.sh --encode-only '$session_dir'"
     log "Enkoodaussessio käynnistetty: $enc_sname"
+    sleep 1  # Annetaan prosessille hetki käynnistyä ennen pgrep-tarkistusta
+    show_enc_status
     echo "  Seuraa: tmux attach -t $enc_sname"
     echo ""
     log "═══ Kaikki valmis! ═══"
