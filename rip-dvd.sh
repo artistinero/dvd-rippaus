@@ -91,6 +91,9 @@ ENC_TIMEOUT=14400
 MAX_RIP_ATTEMPTS=2
 # Minimitila brainbinillä enkoodauksen aikana — alle tämän pysäytetään.
 ENC_SPACE_MIN_GB=3
+# Enkoodausnopeusarvio jonon keston laskentaan: GB VOB-dataa tunnissa.
+# 5 GB/h ≈ 58 min jakso (2 GB VOB) ~24 min — säädä jos todellisuus poikkeaa paljon.
+ENCODE_SPEED_GB_PER_HOUR=5
 
 # ── Apufunktiot ───────────────────────���───────────────────────────────────────
 
@@ -840,34 +843,51 @@ encode_session() {
 }
 
 show_enc_status() {
-    local _running=()
+    local _now; _now=$(date +%s)
+    local _total_eta_secs=0
+
+    # Kerää kaikki sessiot joissa on VOB-dataa
+    local _sessions=()
     for _d in "$OUTBASE"/session_*/; do
         [[ -d "$_d" ]] || continue
         [[ -n "$(find "$_d" -name "*.VOB" -size +10M 2>/dev/null | head -1)" ]] || continue
-        pgrep -f "encode-only.*$(basename "$_d")" > /dev/null 2>&1 || continue
-        _running+=("$_d")
+        _sessions+=("$_d")
     done
-    (( ${#_running[@]} == 0 )) && return
-    echo ""
-    echo "  Enkoodaus käynnissä taustalla (${#_running[@]} sessio(ta)):"
+    (( ${#_sessions[@]} == 0 )) && return
+
+    # Kartta: tmux-panen vanhempi-PID → session-nimi
     declare -A _ps
     while IFS=' ' read -r _s _p; do
         [[ "$_s" == "dvd-rip" || "$_s" == "watchdog" ]] && continue
         _ps["$_p"]="$_s"
     done < <(tmux list-panes -a -F '#{session_name} #{pane_pid}' 2>/dev/null)
-    for _d in "${_running[@]}"; do
-        # Skannaa kaikki levyt sessiossa nimen, kauden ja jaksovälin selvittämiseksi
-        local _n="" _season="" _ep_start="" _ep_end="" _disc_count=0
+
+    echo ""
+    echo "  Enkoodausjono:"
+    echo ""
+
+    for _d in "${_sessions[@]}"; do
+        local _pid; _pid=$(pgrep -f "encode-only.*$(basename "$_d")" 2>/dev/null | head -1)
+        local _is_running=0; [[ -n "$_pid" ]] && _is_running=1
+
+        # Kerää kaikki uniikit nimet + sarjatiedot kaikista levyistä sessiossa
+        local _all_names=() _season="" _ep_start="" _ep_end="" _disc_count=0 _is_series=0
         for _dmf in "$_d"disc-*/meta.conf; do
             [[ -f "$_dmf" ]] || continue
-            local _dt; _dt=$(grep '^TYPE='    "$_dmf" 2>/dev/null | cut -d= -f2)
-            local _dn; _dn=$(grep '^NAME='    "$_dmf" 2>/dev/null | cut -d= -f2-)
-            local _ds; _ds=$(grep '^SEASON='  "$_dmf" 2>/dev/null | cut -d= -f2)
-            [[ -z "$_n" && -n "$_dn" ]] && { _n="$_dn"; _season="$_ds"; }
+            local _dt; _dt=$(grep '^TYPE='   "$_dmf" 2>/dev/null | cut -d= -f2)
+            local _dn; _dn=$(grep '^NAME='   "$_dmf" 2>/dev/null | cut -d= -f2-)
+            if [[ -n "$_dn" ]]; then
+                local _dup=0
+                for _ex in "${_all_names[@]}"; do [[ "$_ex" == "$_dn" ]] && { _dup=1; break; }; done
+                (( _dup )) || _all_names+=("$_dn")
+            fi
             [[ "$_dt" == "series" ]] || continue
+            _is_series=1
             (( _disc_count++ )) || true
-            local _dep;  _dep=$(grep  '^START_EP='     "$_dmf" 2>/dev/null | cut -d= -f2)
-            local _dcnt; _dcnt=$(grep '^TITLE_COUNT='  "$_dmf" 2>/dev/null | cut -d= -f2)
+            local _ds; _ds=$(grep '^SEASON='      "$_dmf" 2>/dev/null | cut -d= -f2)
+            [[ -z "$_season" ]] && _season="$_ds"
+            local _dep;  _dep=$(grep '^START_EP='    "$_dmf" 2>/dev/null | cut -d= -f2)
+            local _dcnt; _dcnt=$(grep '^TITLE_COUNT=' "$_dmf" 2>/dev/null | cut -d= -f2)
             local _dmax; _dmax=$(grep '^MAX_EPISODES=' "$_dmf" 2>/dev/null | cut -d= -f2)
             [[ -n "$_dmax" && -n "$_dcnt" ]] && (( _dmax > 0 && _dcnt > _dmax )) && _dcnt=$_dmax
             [[ -z "$_dep" || -z "$_dcnt" ]] && continue
@@ -875,32 +895,110 @@ show_enc_status() {
             local _dend=$(( _dep + _dcnt - 1 ))
             [[ -z "$_ep_end" || "$_dend" -gt "$_ep_end" ]] && _ep_end=$_dend
         done
-        local _ep_lbl=""
-        if [[ -n "$_ep_start" && -n "$_ep_end" ]]; then
-            if (( _ep_start == _ep_end )); then
-                _ep_lbl=" E$(printf '%02d' "$_ep_start")"
-            else
-                _ep_lbl=" E$(printf '%02d' "$_ep_start")-E$(printf '%02d' "$_ep_end")"
+
+        # Rakenna sisältöotsikko
+        local _content_lbl
+        if (( ${#_all_names[@]} > 1 )); then
+            # Useita eri teoksia — lista kaikki
+            _content_lbl="${_all_names[0]}"
+            for (( _i=1; _i<${#_all_names[@]}; _i++ )); do
+                _content_lbl+=" / ${_all_names[$_i]}"
+            done
+        elif (( ${#_all_names[@]} == 1 )); then
+            _content_lbl="${_all_names[0]}"
+            if (( _is_series )); then
+                [[ -n "$_season" ]] && _content_lbl+=" S${_season}"
+                if [[ -n "$_ep_start" && -n "$_ep_end" ]]; then
+                    if (( _ep_start == _ep_end )); then
+                        _content_lbl+=" E$(printf '%02d' "$_ep_start")"
+                    else
+                        _content_lbl+=" E$(printf '%02d' "$_ep_start")-E$(printf '%02d' "$_ep_end")"
+                    fi
+                    (( _disc_count > 1 )) && _content_lbl+=" (${_disc_count} levyä)"
+                fi
             fi
-            (( _disc_count > 1 )) && _ep_lbl+=" (${_disc_count} levyä)"
+        else
+            _content_lbl="$(basename "$_d")"
         fi
-        local _lbl="${_n:-$(basename "$_d")}${_season:+ S${_season}}${_ep_lbl}"
-        local _st="jonossa"
-        local _pid; _pid=$(pgrep -f "encode-only.*$(basename "$_d")" 2>/dev/null | head -1)
-        if [[ -n "$_pid" ]]; then
+
+        # VOB-koko GB (keston arviointi)
+        local _vob_bytes; _vob_bytes=$(du -sb "$_d"disc-*/dvdbackup/ 2>/dev/null \
+            | awk '{s+=$1} END {print (s ? s : 0)}')
+        local _vob_gb; _vob_gb=$(awk "BEGIN {printf \"%.3f\", ${_vob_bytes}/1073741824}")
+
+        # Laske arvioitu jäljellä oleva aika tälle sessiolle
+        local _session_eta=0 _hb_status="" _hb_eta_secs=0
+
+        if (( _is_running )); then
+            # Lue HandBraken nykyinen edistyminen tmux-panesta
             local _pp; _pp=$(ps -o ppid= -p "$_pid" 2>/dev/null | tr -d ' ')
-            local _sess="${_ps[$_pp]:-}"
-            if [[ -n "$_sess" ]]; then
-                local _pst
-                _pst=$(tmux capture-pane -t "$_sess" -p 2>/dev/null \
-                    | grep -oE '\[.+\] [0-9]+\.[0-9]+%.*ETA [0-9hms]+|jonossa — odotetaan.*' \
+            local _tsess="${_ps[$_pp]:-}"
+            if [[ -n "$_tsess" ]]; then
+                _hb_status=$(tmux capture-pane -t "$_tsess" -p 2>/dev/null \
+                    | grep -oE '\[.+\] [0-9]+\.[0-9]+%.*ETA [0-9hms]+' \
                     | tail -1 | sed 's/^[[:space:]]*//')
-                [[ -n "$_pst" ]] && _st="$_pst"
             fi
+            # Jäsennetään ETA muotoa "ETA 1h23m45s" / "ETA 23m45s" / "ETA 45s"
+            if [[ "$_hb_status" =~ ETA[[:space:]]+([0-9]+h)?([0-9]+m)?([0-9]+s)? ]]; then
+                local _hv="${BASH_REMATCH[1]%h}" _mv="${BASH_REMATCH[2]%m}" _sv="${BASH_REMATCH[3]%s}"
+                _hb_eta_secs=$(( ${_hv:-0}*3600 + ${_mv:-0}*60 + ${_sv:-0} ))
+            fi
+
+            # Laske jäljellä olevat raidat .queue-tiedostosta
+            local _q="${_d}.queue"
+            local _total_q=0 _done_q=0
+            if [[ -f "$_q" ]]; then
+                _total_q=$(wc -l < "$_q")
+                while IFS=$'\x1f' read -r _src _oname _dst _tnum _dlbl _dseq; do
+                    [[ -f "${_dst}/${_oname}" ]] && \
+                    [[ $(stat -c%s "${_dst}/${_oname}" 2>/dev/null || echo 0) -gt 1048576 ]] && \
+                    (( _done_q++ )) || true
+                done < "$_q"
+            fi
+            local _remaining=$(( _total_q > _done_q ? _total_q - _done_q : 0 ))
+
+            # Per-raita-arvio VOB-koosta
+            local _per_secs=0
+            if (( _total_q > 0 )); then
+                _per_secs=$(awk "BEGIN {print int(${_vob_gb}/${ENCODE_SPEED_GB_PER_HOUR}*3600/${_total_q})}")
+            fi
+
+            if (( _hb_eta_secs > 0 && _remaining > 1 )); then
+                _session_eta=$(( _hb_eta_secs + (_remaining - 1) * _per_secs ))
+            elif (( _hb_eta_secs > 0 )); then
+                _session_eta=$_hb_eta_secs
+            elif (( _remaining > 0 && _per_secs > 0 )); then
+                _session_eta=$(( _remaining * _per_secs ))
+            fi
+        else
+            # Jonossa: arvio pelkästä VOB-koosta
+            _session_eta=$(awk "BEGIN {print int(${_vob_gb}/${ENCODE_SPEED_GB_PER_HOUR}*3600)}")
         fi
-        printf '    %-36s %s\n' "${_lbl}:" "$_st"
+
+        (( _session_eta < 0 )) && _session_eta=0
+        _total_eta_secs=$(( _total_eta_secs + _session_eta ))
+
+        # Tulosta rivi
+        local _pfx
+        if (( _is_running )); then _pfx="▶ enkoodataan"; else _pfx="  jonossa   "; fi
+        printf '    %s  %s\n' "$_pfx" "$_content_lbl"
+        [[ -n "$_hb_status" ]] && printf '                 %s\n' "$_hb_status"
+        if (( _session_eta > 0 )); then
+            printf '                 Arvio: ~%s\n' "$(fmt_time "$_session_eta")"
+        fi
     done
+
     unset _ps
+
+    # Yhteenveto
+    if (( _total_eta_secs > 0 )); then
+        local _finish=$(( _now + _total_eta_secs ))
+        local _fin_str; _fin_str=$(date -d "@${_finish}" '+%a %-d.%-m. klo %H:%M')
+        echo ""
+        printf '  Kokonaisaika: ~%s  |  Valmis arviolta: %s\n' \
+            "$(fmt_time "$_total_eta_secs")" "$_fin_str"
+    fi
+    echo ""
 }
 
 # ── Pääohjelma ──────────��─────────────────────────────────────────────────────
