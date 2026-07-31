@@ -662,6 +662,25 @@ encode_session() {
     log "Jonossa $total_titles raitaa / $total_discs levyä enkoodattavana."
     (( total_titles == 0 )) && { log "Ei enkoodattavaa."; return; }
 
+    # Pre-laskenta: montako raitaa per dvd_dir — levykohtaista siivousta varten
+    declare -A _src_total=()
+    local _qs="" _qo="" _qd="" _qt="" _ql="" _qn=""
+    while IFS=$'\x1f' read -r _qs _qo _qd _qt _ql _qn; do
+        _src_total["$_qs"]=$(( ${_src_total["$_qs"]:-0} + 1 ))
+    done < "$queue"
+    declare -A _src_done=()
+
+    # Vapauta dvdbackup-hakemisto heti kun kaikki levyn raidat ovat terastationilla.
+    # Näin tila vapautuu levykohtaisesti eikä vasta koko session lopussa.
+    _cleanup_disc_if_done() {
+        local _s="$1"
+        _src_done["$_s"]=$(( ${_src_done["$_s"]:-0} + 1 ))
+        if (( ${_src_done["$_s"]:-0} >= ${_src_total["$_s"]:-9999} )) && [[ -d "$_s" ]]; then
+            rm -rf "$_s"
+            log "  Siivottu lähde: ${_s##*/}"
+        fi
+    }
+
     # ── Enkoodaussilmukka ─────────────────────────────────────────────────────
 
     # Käynnistä lämpötilavalvonta taustalle
@@ -710,6 +729,7 @@ encode_session() {
         if [[ -f "${dest}/${out_name}" ]] && \
            [[ $(stat -c%s "${dest}/${out_name}" 2>/dev/null || echo 0) -gt 1048576 ]]; then
             log "  Ohitetaan (jo valmis): ${out_name}"
+            _cleanup_disc_if_done "$src"
             continue
         fi
 
@@ -723,6 +743,7 @@ encode_session() {
             if mv "$_enc_out" "${dest}/"; then
                 local _sz; _sz=$(du -sh "${dest}/${out_name}" 2>/dev/null | cut -f1 || echo "?")
                 log "  ✓ ${out_name} (${_sz}) [siirretty uudelleenyrityksestä]"
+                _cleanup_disc_if_done "$src"
                 continue
             fi
             log "  Siirto epäonnistui edelleen — enkoodataan uudelleen"
@@ -783,10 +804,12 @@ encode_session() {
             mv "$out" "$final"
             if mv "$final" "${dest}/"; then
                 log "  ✓ ${out_name} (${sz}, $(fmt_time "$t_secs"), lähde: ${src_sz})"
+                _cleanup_disc_if_done "$src"
             else
                 log "  Siirto epäonnistui — yritetään remountata..."
                 if ensure_terastation && mkdir -p "$dest" && mv "$final" "${dest}/"; then
                     log "  ✓ ${out_name} (${sz}, $(fmt_time "$t_secs"), lähde: ${src_sz}) [siirto onnistui remountin jälkeen]"
+                    _cleanup_disc_if_done "$src"
                 else
                     log "  VIRHE: siirto terastationille epäonnistui — ${out_name} jäi: ${final}"
                     log "         Aja --encode-only kun terastation on taas saatavilla (tiedosto enkoodataan uudelleen)"
@@ -807,11 +830,11 @@ encode_session() {
 
     done < "$queue"
 
-    # ── Lähdesiivous: poista dvdbackup-kansiot kun kaikki raidat varmennettu ─
-    # Lähteet poistetaan VASTA tässä (ei heti enkoodauksen jälkeen) jotta keskeytynyt
-    # enkoodaus voidaan aloittaa uudelleen --encode-only:lla ilman uudelleenrippaamista.
-    # Logiikka: jos KAIKKI levyn raidat löytyvät terastationilta (>1 MB), lähde poistetaan.
-    # Jos yksikin raita puuttuu, lähde säilytetään ja lokiin tulee varoitus.
+    # ── Lähdesiivous: turvaverkko ─────────────────────────────────────────────
+    # Normaalitilanteessa _cleanup_disc_if_done() on jo siivonnut levyt yksi kerrallaan.
+    # Tämä lohko hoitaa mahdolliset jäänteet (esim. enkoodausvirheet joissa osa raidoista
+    # puuttuu). Jos KAIKKI levyn raidat löytyvät terastationilta (> 0 tavua), lähde
+    # poistetaan. Jos yksikin puuttuu, lähde säilytetään ja lokiin tulee varoitus.
     local -A _src_ok
     local _src _out _dest _t _l _n
     while IFS=$'\x1f' read -r _src _out _dest _t _l _n; do
