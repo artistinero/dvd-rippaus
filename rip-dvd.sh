@@ -373,8 +373,10 @@ dest_path() {
     local type="$1" name="$2" val="$3"
     case "$type" in
     series)  printf '%s/series/%s/Season %02d' "$DEST_ROOT" "$name" "$val" ;;
-    movie)   printf '%s/movies/%s (%s)'        "$DEST_ROOT" "$name" "$val" ;;
-    doc)     printf '%s/documentaries/%s (%s)' "$DEST_ROOT" "$name" "$val" ;;
+    movie)   [[ -n "$val" ]] && printf '%s/movies/%s (%s)'        "$DEST_ROOT" "$name" "$val" \
+                             || printf '%s/movies/%s'             "$DEST_ROOT" "$name" ;;
+    doc)     [[ -n "$val" ]] && printf '%s/documentaries/%s (%s)' "$DEST_ROOT" "$name" "$val" \
+                             || printf '%s/documentaries/%s'      "$DEST_ROOT" "$name" ;;
     music)   printf '%s/music/%s'              "$DEST_ROOT" "$name" ;;
     misc)    printf '%s/movies/%s'             "$DEST_ROOT" "$name" ;;
     esac
@@ -483,8 +485,10 @@ print(max(n)+1 if n else 0)" 2>/dev/null || echo 0)
         [[ -n "$p_name" && "$p_type" == "$type" ]] && lbl+=" [$p_name]"
         read -rp "${lbl}: " name; name="${name:-$p_name}"
         [[ -z "$name" ]] && { echo "  Nimi ei voi olla tyhjä." >&2; return 1; }
-        read -rp "Vuosi: " val
-        [[ "$val" =~ ^[0-9]{4}$ ]] || { echo "  Vuosi ei kelpaa (4 numeroa, esim. 1977): '$val'" >&2; return 1; }
+        read -rp "Vuosi (Enter = tuntematon): " val
+        if [[ -n "$val" ]] && ! [[ "$val" =~ ^[0-9]{4}$ ]]; then
+            echo "  Vuosi ei kelpaa (4 numeroa, esim. 1977): '$val'" >&2; return 1
+        fi
         ep=""
         ;;
 
@@ -1186,7 +1190,7 @@ main() {
         printf '  Levyjä ripattuna tässä sessiossa: %d\n' "$disc_num"
         echo "══════════════════════════════════════════════"
         local cmd=""
-        read -rp "  Lisää levy ja paina Enter  (q = aloita enkoodaus): " cmd
+        read -rp "  Lisää levy ja paina Enter  (q = lopeta rippaus): " cmd
         [[ "${cmd,,}" == "q" ]] && break
 
         # Kysy levyn metatiedot — palaa \x1F-eroteltuna merkkijonona
@@ -1443,18 +1447,24 @@ for line in sys.stdin.buffer:
             p_ep=$(( p_ep + effective_count ))
             p_max_ep=""  # Nollaa seuraavaa levyä varten
         fi
+
+        # Käynnistä enkoodaus taustalle heti kun levy on ripattuna
+        local _enc_d_sname="enc-$(basename "$session_dir" | sed 's/session_//')-d$(printf '%03d' "$disc_num")"
+        if tmux new-session -d -s "$_enc_d_sname" \
+            "bash /usr/local/bin/rip-dvd.sh --encode-only '$session_dir'" 2>/dev/null; then
+            printf '  Enkoodaus käynnistetty taustalle (levy %d).\n' "$disc_num"
+            log "  Enkoodaussessio käynnistetty: $_enc_d_sname"
+        fi
     done
 
     if (( disc_num == 0 )); then
         log "Ei levyjä ripattuna."; exit 0
     fi
 
-    printf '  %d levy/levyä ripattuna — käynnistetään enkoodaus taustalle.\n' "$disc_num"
-    local enc_sname; enc_sname="enc-$(basename "$session_dir" | sed 's/session_//')"
-    tmux new-session -d -s "$enc_sname" "bash /usr/local/bin/rip-dvd.sh --encode-only '$session_dir'"
-    log "Enkoodaussessio käynnistetty: $enc_sname"
-    sleep 1  # Annetaan prosessille hetki käynnistyä ennen pgrep-tarkistusta
+    printf '  %d levy/levyä ripattuna — enkoodaus käynnissä taustalla.\n' "$disc_num"
+    sleep 1
     show_enc_status
+    local enc_sname="enc-$(basename "$session_dir" | sed 's/session_//')-d$(printf '%03d' "$disc_num")"
     echo "  Seuraa: tmux attach -t $enc_sname"
     echo ""
     log "═══ Kaikki valmis! ═══"
