@@ -900,7 +900,14 @@ show_enc_status() {
         [[ -n "$(find "$_d" -name "*.VOB" -size +10M 2>/dev/null | head -1)" ]] || continue
         _sessions+=("$_d")
     done
-    (( ${#_sessions[@]} == 0 )) && return
+    echo ""
+    echo "  Enkoodausjono:"
+    echo ""
+    if (( ${#_sessions[@]} == 0 )); then
+        echo "    (ei jonossa)"
+        echo ""
+        return
+    fi
 
     # Kartta: tmux-panen vanhempi-PID → session-nimi
     declare -A _ps
@@ -908,10 +915,6 @@ show_enc_status() {
         [[ "$_s" == "dvd-rip" || "$_s" == "watchdog" ]] && continue
         _ps["$_p"]="$_s"
     done < <(tmux list-panes -a -F '#{session_name} #{pane_pid}' 2>/dev/null)
-
-    echo ""
-    echo "  Enkoodausjono:"
-    echo ""
 
     for _d in "${_sessions[@]}"; do
         local _pid; _pid=$(pgrep -f "encode-only.*$(basename "$_d")" 2>/dev/null | head -1)
@@ -1462,6 +1465,9 @@ for line in sys.stdin.buffer:
     fi
 
     printf '  %d levy/levyä ripattuna — enkoodaus käynnissä taustalla.\n' "$disc_num"
+    local_gb=$(df "$OUTBASE" | awk 'NR==2 {printf "%d", $4/1024/1024}')
+    tera_gb=$(df "$DEST_ROOT" | awk 'NR==2 {printf "%d", $4/1024/1024}')
+    printf '  Levytilaa: brainbin %d GB vapaana, terastation %d GB vapaana\n' "$local_gb" "$tera_gb"
     sleep 1
     show_enc_status
     local enc_sname="enc-$(basename "$session_dir" | sed 's/session_//')-d$(printf '%03d' "$disc_num")"
