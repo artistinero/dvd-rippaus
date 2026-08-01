@@ -669,6 +669,8 @@ encode_session() {
         _src_total["$_qs"]=$(( ${_src_total["$_qs"]:-0} + 1 ))
     done < "$queue"
     declare -A _src_done=()
+    local _rep_ok=0 _rep_fail=()
+    local _rep_start; _rep_start=$(date '+%Y-%m-%d %H:%M:%S')
 
     # Vapauta dvdbackup-hakemisto heti kun kaikki levyn raidat ovat terastationilla.
     # Näin tila vapautuu levykohtaisesti eikä vasta koko session lopussa.
@@ -729,6 +731,7 @@ encode_session() {
         if [[ -f "${dest}/${out_name}" ]] && \
            [[ $(stat -c%s "${dest}/${out_name}" 2>/dev/null || echo 0) -gt 1048576 ]]; then
             log "  Ohitetaan (jo valmis): ${out_name}"
+            (( _rep_ok++ )) || true
             _cleanup_disc_if_done "$src"
             continue
         fi
@@ -743,6 +746,7 @@ encode_session() {
             if mv "$_enc_out" "${dest}/"; then
                 local _sz; _sz=$(du -sh "${dest}/${out_name}" 2>/dev/null | cut -f1 || echo "?")
                 log "  ✓ ${out_name} (${_sz}) [siirretty uudelleenyrityksestä]"
+                (( _rep_ok++ )) || true
                 _cleanup_disc_if_done "$src"
                 continue
             fi
@@ -804,11 +808,13 @@ encode_session() {
             mv "$out" "$final"
             if mv "$final" "${dest}/"; then
                 log "  ✓ ${out_name} (${sz}, $(fmt_time "$t_secs"), lähde: ${src_sz})"
+                (( _rep_ok++ )) || true
                 _cleanup_disc_if_done "$src"
             else
                 log "  Siirto epäonnistui — yritetään remountata..."
                 if ensure_terastation && mkdir -p "$dest" && mv "$final" "${dest}/"; then
                     log "  ✓ ${out_name} (${sz}, $(fmt_time "$t_secs"), lähde: ${src_sz}) [siirto onnistui remountin jälkeen]"
+                    (( _rep_ok++ )) || true
                     _cleanup_disc_if_done "$src"
                 else
                     log "  VIRHE: siirto terastationille epäonnistui — ${out_name} jäi: ${final}"
@@ -821,11 +827,13 @@ encode_session() {
             case "$rc" in
                 124) rc_note=" (aikakatkaisu — HandBrake jumissa yli $(fmt_time "$ENC_TIMEOUT"))" ;;
                 137) rc_note=" (SIGKILL — ylikuumeneminen)" ;;
+                139) rc_note=" (SIGSEGV — HandBrake kaatui muistivirheeseen)" ;;
                 141) rc_note=" (SIGPIPE)" ;;
                 130) rc_note=" (SIGINT — keskeytys)" ;;
                   2) rc_note=" (HandBrake: ei löydettyä titteliä — korruptoitunut lähde?)" ;;
             esac
             log "  VIRHE: enkoodaus epäonnistui — ${out_name} (rc=${rc}${rc_note}, $(fmt_time "$t_secs"))"
+            _rep_fail+=("${out_name}|rc=${rc}${rc_note}")
         fi
 
     done < "$queue"
@@ -857,6 +865,17 @@ encode_session() {
 
     local total_secs=$(( $(date +%s) - session_start ))
     _encode_cleanup
+
+    # Kirjoita enkoodausraportti — luetaan seuraavalla käynnistyskerralla
+    {
+        echo "STARTED=${_rep_start}"
+        echo "FINISHED=$(date '+%Y-%m-%d %H:%M:%S')"
+        echo "OK=${_rep_ok}"
+        echo "FAIL=${#_rep_fail[@]}"
+        local _rf
+        for _rf in "${_rep_fail[@]}"; do echo "FAIL_TITLE=${_rf}"; done
+    } > "${session_dir}/.encode-report"
+
     log "═══ Enkoodaus valmis — yhteensä $(fmt_time "$total_secs") ═══"
 
     # Muistuta lukuvirhelevyistä session lopussa
@@ -1029,6 +1048,56 @@ show_enc_status() {
     echo ""
 }
 
+show_recent_reports() {
+    local _any=0
+    for _d in "$OUTBASE"/session_*/; do
+        local _r="${_d}.encode-report"
+        [[ -f "$_r" ]] || continue
+        local _ok _fail _finished
+        _ok=$(grep '^OK='       "$_r" 2>/dev/null | cut -d= -f2)
+        _fail=$(grep '^FAIL='   "$_r" 2>/dev/null | cut -d= -f2)
+        _finished=$(grep '^FINISHED=' "$_r" 2>/dev/null | cut -d= -f2-)
+
+        # Kerää uniikit nimet sessiosta
+        local _names=()
+        for _mf in "${_d}"disc-*/meta.conf; do
+            [[ -f "$_mf" ]] || continue
+            local _n; _n=$(grep '^NAME=' "$_mf" 2>/dev/null | cut -d= -f2-)
+            [[ -z "$_n" ]] && continue
+            local _dup=0
+            for _e in "${_names[@]}"; do [[ "$_e" == "$_n" ]] && { _dup=1; break; }; done
+            (( _dup )) || _names+=("$_n")
+        done
+        local _lbl
+        if (( ${#_names[@]} == 0 )); then
+            _lbl="$(basename "$_d")"
+        elif (( ${#_names[@]} == 1 )); then
+            _lbl="${_names[0]}"
+        else
+            _lbl="${_names[0]} + $((${#_names[@]}-1)) muuta"
+        fi
+
+        (( _any++ )) || true
+        local _total=$(( ${_ok:-0} + ${_fail:-0} ))
+        local _date="${_finished%% *}"
+
+        if [[ "${_fail:-0}" == "0" ]]; then
+            printf '  ✓ %-42s %d/%d OK  [%s]\n' "$_lbl" "$_total" "$_total" "$_date"
+        else
+            printf '  ✗ %-42s %d/%d OK, %d epäonnistui  [%s]\n' \
+                "$_lbl" "${_ok:-0}" "$_total" "${_fail:-0}" "$_date"
+            local _ft _title _reason
+            while IFS='|' read -r _title _reason; do
+                printf '      ✗ %s\n' "$_title"
+                [[ -n "$_reason" ]] && printf '        %s\n' "${_reason# }"
+            done < <(grep '^FAIL_TITLE=' "$_r" | sed 's/^FAIL_TITLE=//')
+        fi
+    done
+    if (( _any > 0 )); then
+        echo ""
+    fi
+}
+
 # ── Pääohjelma ──────────��─────────────────────────────────────────────────────
 
 main() {
@@ -1062,6 +1131,7 @@ main() {
             pending+=("$d")
         fi
     done
+    show_recent_reports
     show_enc_status
     if (( ${#pending[@]} > 0 )); then
         echo ""
