@@ -857,10 +857,34 @@ encode_session() {
         local _now_ts; _now_ts=$(date +%s)
         if (( _now_ts - last_notify_ts >= 1800 )); then
             local _elapsed=$(( _now_ts - session_start ))
+
+            local _local_gb _tera_gb
+            _local_gb=$(df "$OUTBASE" | awk 'NR==2 {printf "%d", $4/1024/1024}')
+            _tera_gb=$(df "$DEST_ROOT" | awk 'NR==2 {printf "%d", $4/1024/1024}')
+            local _temp; _temp=$(get_temp)
+
+            # ETA: keskiarvo tähän mennessä valmistuneista raidoista × jäljellä olevat
+            local _remaining_n=$(( total_titles - done_n ))
+            local _eta_line=""
+            if (( done_n > 0 && _remaining_n > 0 )); then
+                local _avg=$(( _elapsed / done_n ))
+                _eta_line=$'\n'"ETA: ~$(fmt_time "$(( _avg * _remaining_n ))")"
+            fi
+
+            # Loppujono: kaikkien odottavien raitojen nimet
+            local _queue_list="" _qname
+            while IFS= read -r _qname; do
+                [[ -z "$_qname" ]] && continue
+                _queue_list+=$'\n- '"$_qname"
+            done < <(tail -n +$((done_n + 1)) "$queue" | cut -d $'\x1f' -f2)
+            [[ -z "$_queue_list" ]] && _queue_list=$'\n(jono tyhjä tämän raidan jälkeen)'
+
             notify "DVD-enkoodus käynnissä" \
 "Levy ${disc_n}/${total_discs} — raita ${done_n}/${total_titles}
 Nyt: ${out_name}
-Kulunut: $(fmt_time "$_elapsed") — valmiit: ${_rep_ok}, virheet: ${#_rep_fail[@]}"
+Kulunut: $(fmt_time "$_elapsed") — valmiit: ${_rep_ok}, virheet: ${#_rep_fail[@]}${_eta_line}
+Tila: brainbin ${_local_gb} GB, terastation ${_tera_gb} GB — lämpötila ${_temp}°C
+Jonossa (${_remaining_n}):${_queue_list}"
             last_notify_ts=$_now_ts
         fi
 
