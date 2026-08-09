@@ -98,6 +98,18 @@ ENCODE_SPEED_GB_PER_HOUR=5
 # ── Apufunktiot ───────────────────────���───────────────────────────────────────
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOGFILE"; }
+
+NTFY_URL="http://127.0.0.1:4444/dvd-rippaus"
+
+# Lähettää ntfy-ilmoituksen. Epäonnistuminen (esim. ntfy pois päältä) ei saa
+# koskaan katkaista enkoodausta — siksi -m timeout ja || true.
+notify() {
+    local title="$1" msg="$2" prio="${3:-default}"
+    curl -s -m 10 -d "$msg" \
+        -H "Title: $title" \
+        -H "Priority: $prio" \
+        "$NTFY_URL" >/dev/null 2>&1 || log "  VAROITUS: ntfy-ilmoitus epäonnistui"
+}
 _wait_enter() {
     echo "" >&2
     echo "  Loki: $LOGFILE" >&2
@@ -711,6 +723,7 @@ encode_session() {
     trap "_encode_cleanup; exit 1" INT TERM
 
     local done_n=0 session_start; session_start=$(date +%s)
+    local last_notify_ts=$session_start
     local enc_dir="${session_dir}/encoded"
     mkdir -p "$enc_dir"
 
@@ -840,6 +853,17 @@ encode_session() {
             _rep_fail+=("${out_name}|rc=${rc}${rc_note}")
         fi
 
+        # ── Määräaikaisraportti ntfy:hen (30 min välein) ────────────────────
+        local _now_ts; _now_ts=$(date +%s)
+        if (( _now_ts - last_notify_ts >= 1800 )); then
+            local _elapsed=$(( _now_ts - session_start ))
+            notify "DVD-enkoodus käynnissä" \
+"Levy ${disc_n}/${total_discs} — raita ${done_n}/${total_titles}
+Nyt: ${out_name}
+Kulunut: $(fmt_time "$_elapsed") — valmiit: ${_rep_ok}, virheet: ${#_rep_fail[@]}"
+            last_notify_ts=$_now_ts
+        fi
+
     done < "$queue"
 
     # ── Lähdesiivous: turvaverkko ─────────────────────────────────────────────
@@ -879,6 +903,15 @@ encode_session() {
         local _rf
         for _rf in "${_rep_fail[@]}"; do echo "FAIL_TITLE=${_rf}"; done
     } > "${session_dir}/.encode-report"
+
+    # ── Loppuraportti ntfy:hen ────────────────────────────────────────────────
+    local _fail_lines="" _rf
+    for _rf in "${_rep_fail[@]}"; do _fail_lines+=$'\n'"- ${_rf}"; done
+    local _prio="default"
+    (( ${#_rep_fail[@]} > 0 )) && _prio="high"
+    notify "DVD-enkoodausjono tyhjä ✓" \
+"${_rep_ok} onnistui, ${#_rep_fail[@]} epäonnistui — $(fmt_time "$total_secs")${_fail_lines}" \
+        "$_prio"
 
     log "═══ Enkoodaus valmis — yhteensä $(fmt_time "$total_secs") ═══"
 
