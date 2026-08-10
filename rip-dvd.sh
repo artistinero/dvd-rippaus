@@ -113,8 +113,18 @@ notify() {
 _wait_enter() {
     echo "" >&2
     echo "  Loki: $LOGFILE" >&2
-    echo "  [Paina Enter sulkeaksesi — tai odota 60s]" >&2
-    read -rt 60 < /dev/tty 2>/dev/null || true
+    echo "  [Paina VÄLILYÖNTIÄ sulkeaksesi — tai odota 3 min]" >&2
+    # Välilyönti eikä Enter tahallaan: 'q'-komennon perässä tuleva Enter
+    # (tai muu nopea näppäily) ei saa vahingossa sulkea juuri auennutta raporttia.
+    [[ -e /dev/tty ]] || return
+    local _key="" _deadline=$(( $(date +%s) + 180 ))
+    while (( $(date +%s) < _deadline )); do
+        # IFS= pakollinen: muuten read karsii välilyönnin pois muuttujasta
+        # vaikka -n1 lukisi sen onnistuneesti (exit 0, ei aikakatkaisu) —
+        # ilman tätä _key jää aina tyhjäksi eikä välilyönti koskaan täsmää.
+        IFS= read -rsn1 -t 5 _key < /dev/tty 2>/dev/null
+        [[ "$_key" == " " ]] && return
+    done
 }
 die() {
     log "VIRHE: $*"
@@ -1006,11 +1016,9 @@ show_enc_status() {
         # Rakenna sisältöotsikko
         local _content_lbl
         if (( ${#_all_names[@]} > 1 )); then
-            # Useita eri teoksia — lista kaikki
-            _content_lbl="${_all_names[0]}"
-            for (( _i=1; _i<${#_all_names[@]}; _i++ )); do
-                _content_lbl+=" / ${_all_names[$_i]}"
-            done
+            # Useita eri teoksia — otsikkoon vain määrä, nimet tulostetaan omille
+            # riveilleen alempana ettei tule yhtä pitkää /-erotettua pötköä.
+            _content_lbl="${#_all_names[@]} eri teosta"
         elif (( ${#_all_names[@]} == 1 )); then
             _content_lbl="${_all_names[0]}"
             if (( _is_series )); then
@@ -1093,6 +1101,11 @@ show_enc_status() {
         local _pfx
         if (( _is_running )); then _pfx="▶ enkoodataan"; else _pfx="  jonossa   "; fi
         printf '    %s  %s\n' "$_pfx" "$_content_lbl"
+        if (( ${#_all_names[@]} > 1 )); then
+            for _nm in "${_all_names[@]}"; do
+                printf '                 - %s\n' "$_nm"
+            done
+        fi
         [[ -n "$_hb_status" ]] && printf '                 %s\n' "$_hb_status"
         if (( _session_eta > 0 )); then
             printf '                 Arvio: ~%s\n' "$(fmt_time "$_session_eta")"
@@ -1518,7 +1531,9 @@ for line in sys.stdin.buffer:
     done
 
     if (( disc_num == 0 )); then
-        log "Ei levyjä ripattuna."; exit 0
+        log "Ei levyjä ripattuna."
+        _wait_enter
+        exit 0
     fi
 
     printf '  %d levy/levyä ripattuna — enkoodaus käynnissä taustalla.\n' "$disc_num"
@@ -1531,6 +1546,10 @@ for line in sys.stdin.buffer:
     echo "  Seuraa: tmux attach -t $enc_sname"
     echo ""
     log "═══ Kaikki valmis! ═══"
+
+    # Ilman tätä tmux-ikkuna (ja koko dvd-rip-sessio) sulkeutuu heti kun
+    # main() palaa, ja yllä oleva raportti vilahtaa näytöllä näkymättömiin.
+    _wait_enter
 }
 
 main "$@"
