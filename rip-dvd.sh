@@ -539,6 +539,50 @@ print(max(n)+1 if n else 0)" 2>/dev/null || echo 0)
 # HandBrakeCLI:n jokaiselle raidalle.
 # Siirtää valmiit tiedostot terastationille ja poistaa dvdbackup-lähteet
 # VASTA kun kaikki raidat on varmistettu terastationilla (palautumisturva).
+
+# Etsii MUUT session-hakemistot (ei nykyinen) joissa on enkoodaamatonta
+# VOB-dataa — nämä odottavat samaa flock-lukkoa. Ilman tätä notify() näyttäisi
+# jonon "tyhjäksi" heti kun nykyinen sessio valmistuu, vaikka toinen sessio
+# istuisi täynnä työtä odottamassa omaa vuoroaan (havaittu 2026-08-11: Police-
+# levyn 32 raitaa odotti flockia lähes 12h, mutta ilmoitus väitti jonon olevan
+# tyhjä koska se raportoi vain paikallisesta .queue-tiedostosta).
+# TITLE_COUNT+MAX_EPISODES-summa on arvio, ei tarkka luku (sama karkeus kuin
+# show_enc_status():ssa) — tarkka määrä selviää vasta kun sessio pääsee vuoroon.
+_other_sessions_pending() {
+    local _self="${1%/}"
+    local _n_sessions=0 _n_titles=0
+    local -a _labels=()
+    local _d
+    for _d in "$OUTBASE"/session_*/; do
+        [[ -d "$_d" ]] || continue
+        [[ "${_d%/}" == "$_self" ]] && continue
+        [[ -n "$(find "$_d" -name "*.VOB" -size +10M 2>/dev/null | head -1)" ]] || continue
+
+        local _sess_titles=0 _name="" _dmf
+        for _dmf in "$_d"disc-*/meta.conf; do
+            [[ -f "$_dmf" ]] || continue
+            local _dn; _dn=$(grep '^NAME=' "$_dmf" 2>/dev/null | cut -d= -f2-)
+            [[ -z "$_name" && -n "$_dn" ]] && _name="$_dn"
+            local _dcnt; _dcnt=$(grep '^TITLE_COUNT=' "$_dmf" 2>/dev/null | cut -d= -f2)
+            local _dmax; _dmax=$(grep '^MAX_EPISODES=' "$_dmf" 2>/dev/null | cut -d= -f2)
+            [[ -n "$_dmax" && -n "$_dcnt" ]] && (( _dmax > 0 && _dcnt > _dmax )) && _dcnt=$_dmax
+            _sess_titles=$(( _sess_titles + ${_dcnt:-0} ))
+        done
+        if (( _sess_titles > 0 )); then
+            (( _n_sessions++ )) || true
+            _n_titles=$(( _n_titles + _sess_titles ))
+            _labels+=("${_name:-$(basename "$_d")} (~${_sess_titles})")
+        fi
+    done
+
+    if (( _n_sessions > 0 )); then
+        local _out="+ ${_n_sessions} muu sessio jonossa, yht. ~${_n_titles} raitaa:"
+        local _l
+        for _l in "${_labels[@]}"; do _out+=$'\n- '"$_l"; done
+        echo "$_out"
+    fi
+}
+
 encode_session() {
     local session_dir="$1"
 
@@ -889,12 +933,16 @@ encode_session() {
             done < <(tail -n +$((done_n + 1)) "$queue" | cut -d $'\x1f' -f2)
             [[ -z "$_queue_list" ]] && _queue_list=$'\n(jono tyhjä tämän raidan jälkeen)'
 
+            local _other; _other=$(_other_sessions_pending "$session_dir")
+            local _other_line=""
+            [[ -n "$_other" ]] && _other_line=$'\n\n'"$_other"
+
             notify "DVD-enkoodus käynnissä" \
 "Levy ${disc_n}/${total_discs} — raita ${done_n}/${total_titles}
 Nyt: ${out_name}
 Kulunut: $(fmt_time "$_elapsed") — valmiit: ${_rep_ok}, virheet: ${#_rep_fail[@]}${_eta_line}
 Tila: brainbin ${_local_gb} GB, terastation ${_tera_gb} GB — lämpötila ${_temp}°C
-Jonossa (${_remaining_n}):${_queue_list}"
+Jonossa (${_remaining_n}):${_queue_list}${_other_line}"
             last_notify_ts=$_now_ts
         fi
 
@@ -939,12 +987,23 @@ Jonossa (${_remaining_n}):${_queue_list}"
     } > "${session_dir}/.encode-report"
 
     # ── Loppuraportti ntfy:hen ────────────────────────────────────────────────
+    # Otsikko ei saa väittää jonon olevan tyhjä jos toinen sessio odottaa yhä
+    # flockia täynnä työtä — muuten ilmoitus valehtelee (ks. _other_sessions_pending).
     local _fail_lines="" _rf
     for _rf in "${_rep_fail[@]}"; do _fail_lines+=$'\n'"- ${_rf}"; done
     local _prio="default"
     (( ${#_rep_fail[@]} > 0 )) && _prio="high"
-    notify "DVD-enkoodausjono tyhjä ✓" \
-"${_rep_ok} onnistui, ${#_rep_fail[@]} epäonnistui — $(fmt_time "$total_secs")${_fail_lines}" \
+
+    local _other; _other=$(_other_sessions_pending "$session_dir")
+    local _title="DVD-enkoodausjono tyhjä ✓"
+    local _other_line=""
+    if [[ -n "$_other" ]]; then
+        _title="Sessio valmis — jono jatkuu"
+        _other_line=$'\n\n'"$_other"
+    fi
+
+    notify "$_title" \
+"${_rep_ok} onnistui, ${#_rep_fail[@]} epäonnistui — $(fmt_time "$total_secs")${_fail_lines}${_other_line}" \
         "$_prio"
 
     log "═══ Enkoodaus valmis — yhteensä $(fmt_time "$total_secs") ═══"
