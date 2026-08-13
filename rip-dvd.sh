@@ -357,6 +357,21 @@ wait_for_disc() {
     echo "$dev"
 }
 
+# Palauttaa (stdout, yksi per rivi) session-hakemiston levyt joilla on sekä
+# meta.conf että vähintään yksi >10M VOB dvdbackup-kansiossa — eli oikeasti
+# enkoodattavissa olevaa dataa. Levy jolta meta.conf puuttuu (esim. rippaus
+# kaatui ennen sen kirjoittamista) ei voi koskaan päätyä encode_session:iin,
+# joten sen jäljelle jäänyt VOB-roska ei saa laukaista "jonossa"-tilaa eikä
+# vääristää session-otsikon nimeä jo valmiiksi enkoodatuilla levyillä.
+_session_pending_discs() {
+    local _sdir="$1" _dmf _ddir
+    for _dmf in "$_sdir"disc-*/meta.conf; do
+        [[ -f "$_dmf" ]] || continue
+        _ddir="$(dirname "$_dmf")/dvdbackup"
+        [[ -n "$(find "$_ddir" -name "*.VOB" -size +10M 2>/dev/null | head -1)" ]] && echo "$_dmf"
+    done
+}
+
 # Skannaa DVD-hakemiston ja tulostaa niiden otsikoiden (title) numerot
 # joiden kesto on vähintään MIN_DURATION sekuntia.
 # Käytetään sekä rippausvaiheessa (TITLE_COUNT:n laskemiseen meta.conf:iin)
@@ -716,7 +731,10 @@ encode_session() {
         for t in "${extra_titles[@]}"; do
             local out_name
             case "$type" in
-            series) out_name="${name} S$(printf '%02d' "$season") Extra $(printf '%02d' "$extra_num").mkv" ;;
+            # "-extra"-pääte on Jellyfinin oma ekstratunniste (ks. jellyfin.org/docs/general/server/media/shows).
+            # Ilman sitä Jellyfin tulkitsee numeron jaksonumeroksi ja joko peittää
+            # oikean jakson tai näyttää sen tuplana väärällä nimellä.
+            series) out_name="${name} S$(printf '%02d' "$season") Extra $(printf '%02d' "$extra_num")-extra.mkv" ;;
             *)      out_name="${name} - Extra $(printf '%02d' "$extra_num").mkv" ;;
             esac
             printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
@@ -1023,7 +1041,7 @@ show_enc_status() {
     local _sessions=()
     for _d in "$OUTBASE"/session_*/; do
         [[ -d "$_d" ]] || continue
-        [[ -n "$(find "$_d" -name "*.VOB" -size +10M 2>/dev/null | head -1)" ]] || continue
+        [[ -n "$(_session_pending_discs "$_d")" ]] || continue
         _sessions+=("$_d")
     done
     echo ""
@@ -1046,9 +1064,12 @@ show_enc_status() {
         local _pid; _pid=$(pgrep -f "encode-only.*$(basename "$_d")" 2>/dev/null | head -1)
         local _is_running=0; [[ -n "$_pid" ]] && _is_running=1
 
-        # Kerää kaikki uniikit nimet + sarjatiedot kaikista levyistä sessiossa
+        # Kerää kaikki uniikit nimet + sarjatiedot vain niiltä levyiltä joilla
+        # on oikeasti vielä enkoodaamatonta dataa — muuten jo valmiiden ja
+        # siivottujen levyjen nimet/jaksonumerot vuotaisivat otsikkoon vaikka
+        # session on merkitty "jonossa" pelkän erillisen roskalevyn takia.
         local _all_names=() _season="" _ep_start="" _ep_end="" _disc_count=0 _is_series=0
-        for _dmf in "$_d"disc-*/meta.conf; do
+        while IFS= read -r _dmf; do
             [[ -f "$_dmf" ]] || continue
             local _dt; _dt=$(grep '^TYPE='   "$_dmf" 2>/dev/null | cut -d= -f2)
             local _dn; _dn=$(grep '^NAME='   "$_dmf" 2>/dev/null | cut -d= -f2-)
@@ -1070,7 +1091,7 @@ show_enc_status() {
             [[ -z "$_ep_start" || "$_dep" -lt "$_ep_start" ]] && _ep_start=$_dep
             local _dend=$(( _dep + _dcnt - 1 ))
             [[ -z "$_ep_end" || "$_dend" -gt "$_ep_end" ]] && _ep_end=$_dend
-        done
+        done < <(_session_pending_discs "$_d")
 
         # Rakenna sisältöotsikko
         local _content_lbl
@@ -1260,7 +1281,7 @@ main() {
     local running_enc=() pending=()
     for d in "$OUTBASE"/session_*/; do
         [[ -d "$d" ]] || continue
-        [[ -n "$(find "$d" -name "*.VOB" -size +10M 2>/dev/null | head -1)" ]] || continue
+        [[ -n "$(_session_pending_discs "$d")" ]] || continue
         if pgrep -f "encode-only.*$(basename "$d")" > /dev/null 2>&1; then
             running_enc+=("$d")
         else
