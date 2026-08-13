@@ -1445,7 +1445,7 @@ except Exception:
     except Exception:
         sys.exit(0)
 for u, d in [('G', 1024**3), ('M', 1024**2)]:
-    if b >= d: print(f'{b/d:.1f}{u}'); break
+    if b >= d: print(f'{b/d:.2f}{u}'); break
 " "$disc_dev" 2>/dev/null || true)
 
         # Rippaa DVD taustalla — mahdollistaa aikakatkaisu- ja uudelleenyrityslogiikan.
@@ -1467,7 +1467,14 @@ for u, d in [('G', 1024**3), ('M', 1024**2)]:
             while kill -0 "$dv_pid" 2>/dev/null; do
                 sleep 10
                 (( rip_waited += 10 )) || true
-                local sz; sz=$(du -sh "$dv_dir" 2>/dev/null | cut -f1)
+                # du -sh antaa aina vain yhden desimaalin — pieni edistyminen
+                # (esim. lukuvirheen jälkeisen hidastuksen aikana) ei näy siinä
+                # ollenkaan ja rippaus vaikuttaa jumiutuneelta vaikka etenee.
+                local sz_bytes; sz_bytes=$(du -sb "$dv_dir" 2>/dev/null | cut -f1)
+                local sz; sz=$(awk -v b="${sz_bytes:-0}" 'BEGIN {
+                    if (b >= 1073741824) printf "%.2fG", b/1073741824
+                    else printf "%.2fM", b/1048576
+                }')
                 if [[ -n "$disc_total_hr" ]]; then
                     printf '\r  [rippaus] %s / %s  (%s kulunut)' "$sz" "$disc_total_hr" "$(fmt_time "$rip_waited")" >&2
                 else
