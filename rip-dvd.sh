@@ -4,6 +4,8 @@
 # Käyttö:
 #   rip-dvd.sh                          Normaali rippaus + enkoodaus
 #   rip-dvd.sh --encode-only <hakemisto> Enkoodaa olemassaoleva sessio uudelleen
+#   rip-dvd.sh --skip   <hakemisto> "<tiedostonimi>" Luovu raidasta pysyvästi
+#   rip-dvd.sh --unskip <hakemisto> "<tiedostonimi>" Peru luovutus, yritä uudelleen
 #
 # Vaatii: dvdbackup, HandBrakeCLI, lm-sensors, python3, flock (util-linux)
 
@@ -31,10 +33,19 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "--?" ]]; then
 Käyttö:
   rip-dvd.sh                           Normaali rippaus + enkoodaus
   rip-dvd.sh --encode-only <hakemisto>  Enkoodaa olemassaoleva sessio uudelleen
+  rip-dvd.sh --skip   <hakemisto> "<tiedostonimi>"  Luovu raidasta pysyvästi
+  rip-dvd.sh --unskip <hakemisto> "<tiedostonimi>"  Peru luovutus
   rip-dvd.sh --help                    Tämä ohje
 
 --encode-only on hyödyllinen kun bootti tai muu keskeytys katkaisee enkoodauksen.
 Skripti ohittaa automaattisesti raidat jotka ovat jo terastationilla.
+
+--skip on tarkoitettu raidalle joka epäonnistuu toistuvasti samasta syystä
+(esim. levyvaurio) eikä sitä enää kannata yrittää. Ohitettu raita ei enää
+laukaise "enkoodaamattomia sessioita" -kysymystä, mutta lähde-VOB säilyy
+levyllä koskemattomana — muut saman levyn raidat yritetään silti normaalisti.
+Tiedostonimi on sama kuin FAIL_TITLE-riveillä epäonnistumisraportissa, esim:
+  rip-dvd.sh --skip ~/dvd-rip-tmp/session_20260813_212344 "Bender's Big Score - Part 01.mkv"
 
 EOF
     echo "Olemassaolevat sessiot joissa on dvdbackup-dataa:"
@@ -47,6 +58,47 @@ EOF
         fi
     done
     (( local_found )) || echo "  (ei löydy)"
+    exit 0
+fi
+
+# ── --skip / --unskip: nopea synkroninen komento, ei vaadi tmux-istuntoa ────
+# Nämä vain lisäävät/poistavat rivin sessio-hakemiston .skip-titles-tiedostoon
+# — ei rippausta eikä enkoodausta, joten ei tarvetta pysyä hengissä SSH:n
+# katkettua. Käsitellään tässä ennen tmux-käynnistystä, jotta komento ei jää
+# jumiin odottamaan tmux-istuntoa tai liity vahingossa väärään sessioon.
+if [[ "${1:-}" == "--skip" || "${1:-}" == "--unskip" ]]; then
+    _action="$1"; _sdir="${2:-}"; _title="${3:-}"
+    if [[ -z "$_sdir" || -z "$_title" ]]; then
+        echo "Käyttö: rip-dvd.sh ${_action} <session-hakemisto> \"<tiedostonimi>\"" >&2
+        exit 1
+    fi
+    if [[ ! -d "$_sdir" ]]; then
+        echo "VIRHE: Hakemisto ei löydy: $_sdir" >&2
+        exit 1
+    fi
+    _sf="${_sdir%/}/.skip-titles"
+    if [[ "$_action" == "--skip" ]]; then
+        if grep -qFx "$_title" "$_sf" 2>/dev/null; then
+            echo "Jo merkitty pysyvästi ohitetuksi: $_title"
+        else
+            echo "$_title" >> "$_sf"
+            echo "Merkitty pysyvästi ohitetuksi: $_title"
+            echo "(Lähde-VOB säilyy koskemattomana — poista se itse jos haluat vapauttaa tilaa.)"
+        fi
+    else
+        if [[ -f "$_sf" ]] && grep -qFx "$_title" "$_sf"; then
+            # HUOM: grep -v palauttaa exit 1 (ei "virhe", vaan "ei jäänyt yhtään
+            # riviä") kun poistettava rivi oli tiedoston AINOA rivi — "&&" tässä
+            # olisi silloin estänyt mv:n suorittumisen kokonaan ja rivi olisi
+            # jäänyt tiedostoon näennäisesti poistetun näköisenä. Siksi mv
+            # ajetaan aina, riippumatta grepin exit-koodista.
+            grep -vFx "$_title" "$_sf" > "${_sf}.tmp"
+            mv "${_sf}.tmp" "$_sf"
+            echo "Poistettu ohituslistalta — yritetään uudelleen seuraavalla enkoodauksella: $_title"
+        else
+            echo "Ei ollut ohituslistalla: $_title"
+        fi
+    fi
     exit 0
 fi
 
@@ -431,6 +483,73 @@ wait_for_disc() {
     echo "$dev"
 }
 
+# ── Pysyvästi luovutetut raidat (--skip) ────────────────────────────────────
+# Jos jokin raita epäonnistuu toistuvasti samasta syystä (esim. levyvaurio),
+# käyttäjä voi merkitä sen pysyvästi ohitetuksi ilman että lähde-VOB poistetaan
+# (ks. --skip/--unskip komentorivillä). Näin skripti lakkaa kysymästä samaa
+# rataa uudelleen joka käynnistyksellä, mutta muut saman levyn/session raidat
+# yritetään silti normaalisti. Yksi sessio = yksi lista, tiedostonimiä
+# (out_name, sama muoto kuin FAIL_TITLE-riveillä) yksi per rivi.
+_skip_file() {
+    printf '%s/.skip-titles' "${1%/}"
+}
+
+_title_is_skipped() {
+    local _sdir="$1" _title="$2" _sf
+    _sf=$(_skip_file "$_sdir")
+    [[ -f "$_sf" ]] || return 1
+    grep -qFx "$_title" "$_sf"
+}
+
+# Tulostaa yhden enkoodausraportin FAIL_TITLE-rivit yhtenäisessä muodossa:
+# pysyvästi ohitetut (--skip) omalla merkillään ("⊘"), muut syyllä ("✗") ja
+# valinnaisesti vinkillä miten raidasta voi luopua. Yhteinen apufunktio, jota
+# käyttävät sekä show_recent_reports() että main() pending-kehotteessaan —
+# näin molemmat näyttävät aina saman tiedon samalla tavalla eikä korjaus
+# unohdu toisesta kohdasta jos jompaakumpaa muutetaan.
+_print_fail_titles() {
+    local _sdir="$1" _rep="$2" _show_hint="${3:-0}"
+    local _title _reason
+    while IFS='|' read -r _title _reason; do
+        if _title_is_skipped "$_sdir" "$_title"; then
+            printf '      ⊘ %s  (ohitettu pysyvästi, ei yritetä)\n' "$_title"
+        else
+            printf '      ✗ %s\n' "$_title"
+            [[ -n "$_reason" ]] && printf '        %s\n' "${_reason# }"
+            if (( _show_hint )); then
+                printf '        → luovutus: rip-dvd.sh --skip '"'"'%s'"'"' "%s"\n' "$_sdir" "$_title"
+            fi
+        fi
+    done < <(grep '^FAIL_TITLE=' "$_rep" | sed 's/^FAIL_TITLE=//')
+}
+
+# Palauttaa tosi (exit 0) jos session-hakemistolla on OIKEASTI vielä
+# enkoodusta odottavaa dataa. Kaksi ehtoa: (1) lähde-VOB:eja on yhä levyllä,
+# JA (2) jos viimeisin enkoodausraportti kertoo epäonnistumisia, ainakin yksi
+# niistä EI ole merkitty pysyvästi ohitetuksi. Ilman tätä toista ehtoa sessio,
+# jonka kaikki epäonnistumiset on jo tietoisesti luovutettu, näyttäisi
+# "jonossa"-tilassa ikuisesti — vaikka mitään ei enää oikeasti yritettäisi
+# (lähde-VOB:eja EI poisteta automaattisesti pelkän --skipin takia, joten
+# niiden olemassaolo yksinään ei riitä todisteeksi kesken olevasta työstä).
+_session_has_pending_work() {
+    local _sdir="${1%/}/"
+    [[ -n "$(find "$_sdir" -name "*.VOB" -size +10M 2>/dev/null | head -1)" ]] || return 1
+
+    local _rep="${_sdir}.encode-report"
+    if [[ -f "$_rep" ]]; then
+        local _fail_n; _fail_n=$(grep '^FAIL=' "$_rep" 2>/dev/null | cut -d= -f2)
+        if [[ -n "$_fail_n" && "$_fail_n" != "0" ]]; then
+            local _ft _unresolved=0
+            while IFS= read -r _ft; do
+                [[ -z "$_ft" ]] && continue
+                _title_is_skipped "$_sdir" "$_ft" || _unresolved=1
+            done < <(grep '^FAIL_TITLE=' "$_rep" | sed 's/^FAIL_TITLE=//' | cut -d'|' -f1)
+            (( _unresolved == 0 )) && return 1
+        fi
+    fi
+    return 0
+}
+
 # Palauttaa (stdout, yksi per rivi) session-hakemiston levyt joilla on sekä
 # meta.conf että vähintään yksi >10M VOB dvdbackup-kansiossa — eli oikeasti
 # enkoodattavissa olevaa dataa. Levy jolta meta.conf puuttuu (esim. rippaus
@@ -439,6 +558,7 @@ wait_for_disc() {
 # vääristää session-otsikon nimeä jo valmiiksi enkoodatuilla levyillä.
 _session_pending_discs() {
     local _sdir="$1" _dmf _ddir
+    _session_has_pending_work "$_sdir" || return 0
     for _dmf in "$_sdir"disc-*/meta.conf; do
         [[ -f "$_dmf" ]] || continue
         _ddir="$(dirname "$_dmf")/dvdbackup"
@@ -668,7 +788,7 @@ _other_sessions_pending() {
     for _d in "$OUTBASE"/session_*/; do
         [[ -d "$_d" ]] || continue
         [[ "${_d%/}" == "$_self" ]] && continue
-        [[ -n "$(find "$_d" -name "*.VOB" -size +10M 2>/dev/null | head -1)" ]] || continue
+        _session_has_pending_work "$_d" || continue
 
         local _sess_titles=0 _name="" _dmf
         for _dmf in "$_d"disc-*/meta.conf; do
@@ -867,7 +987,7 @@ encode_session() {
         _src_total["$_qs"]=$(( ${_src_total["$_qs"]:-0} + 1 ))
     done < "$queue"
     declare -A _src_done=()
-    local _rep_ok=0 _rep_fail=()
+    local _rep_ok=0 _rep_fail=() _rep_skip=0
     local _rep_start; _rep_start=$(date '+%Y-%m-%d %H:%M:%S')
 
     # Vapauta dvdbackup-hakemisto heti kun kaikki levyn raidat ovat terastationilla.
@@ -916,6 +1036,15 @@ encode_session() {
     # Käydään läpi jonoon aiemmin kirjoitetut rivit, yksi raita kerrallaan.
     while IFS=$'\x1f' read -r src out_name dest title_num disc_label disc_n; do
         (( done_n++ )) || true
+
+        # Tarkistus 0: käyttäjä on jo aiemmin päättänyt luovuttaa tästä raidasta
+        # (--skip). Ei yritetä, ei lasketa onnistuneeksi eikä epäonnistuneeksi —
+        # lähde-VOB säilyy koskemattomana siltä varalta että päätös perutaan.
+        if _title_is_skipped "$session_dir" "$out_name"; then
+            log "  Ohitetaan pysyvästi (merkitty luovutuksi --skipillä): ${out_name}"
+            (( _rep_skip++ )) || true
+            continue
+        fi
 
         # Tarkistetaan levytila ennen jokaista raitaa. Näin skripti pysähtyy
         # heti selkeällä virheviestillä jos tila loppuu kesken, sen sijaan
@@ -1041,8 +1170,10 @@ encode_session() {
                 141) rc_note=" (yhteys HandBrakeen katkesi kesken kaiken)" ;;
                 130) rc_note=" (keskeytetty, esim. Ctrl+C)" ;;
                   2) rc_note=" (HandBrake: ei löydettyä titteliä — korruptoitunut lähde?)" ;;
+                  5) rc_note=" (HandBrake kaatui hiljaa kesken ajon, ei virheviestiä — tässä projektissa tähän mennessä liittynyt aina lähteen datavaurioon, ei skriptin bugiin)" ;;
             esac
             log "  VIRHE: enkoodaus epäonnistui — ${out_name} (rc=${rc}${rc_note}, $(fmt_time "$t_secs"))"
+            log "         Jos tämä toistuu eikä kannata enää yrittää: rip-dvd.sh --skip '${session_dir}' \"${out_name}\""
             _rep_fail+=("${out_name}|rc=${rc}${rc_note}")
         fi
 
@@ -1116,15 +1247,20 @@ Jonossa (${_remaining_n}):${_queue_list}${_other_line}"
     local total_secs=$(( $(date +%s) - session_start ))
     _encode_cleanup
 
-    # Kirjoita enkoodausraportti — luetaan seuraavalla käynnistyskerralla
+    # Kirjoita enkoodausraportti — luetaan seuraavalla käynnistyskerralla.
+    # Atominen kirjoitus (.tmp + mv): jos virransyöttö katkeaa kesken
+    # kirjoituksen, vanha raportti säilyy ehjänä sen sijaan että jäisi
+    # jäljelle puolikas tiedosto jolta esim. FAIL=-rivi puuttuisi.
     {
         echo "STARTED=${_rep_start}"
         echo "FINISHED=$(date '+%Y-%m-%d %H:%M:%S')"
         echo "OK=${_rep_ok}"
         echo "FAIL=${#_rep_fail[@]}"
+        echo "SKIP=${_rep_skip}"
         local _rf
         for _rf in "${_rep_fail[@]}"; do echo "FAIL_TITLE=${_rf}"; done
-    } > "${session_dir}/.encode-report"
+    } > "${session_dir}/.encode-report.tmp"
+    mv "${session_dir}/.encode-report.tmp" "${session_dir}/.encode-report"
 
     # ── Lähetetään käyttäjän puhelimeen loppuraportti kun kaikki on valmista ──
     # Otsikko ei saa väittää koko työn olevan valmis, jos toinen rippaus-istunto
@@ -1143,11 +1279,14 @@ Jonossa (${_remaining_n}):${_queue_list}${_other_line}"
         _other_line=$'\n\n'"$_other"
     fi
 
+    local _skip_note=""
+    (( _rep_skip > 0 )) && _skip_note=", ${_rep_skip} ohitettu pysyvästi (--skip)"
+
     notify "$_title" \
-"${_rep_ok} onnistui, ${#_rep_fail[@]} epäonnistui — $(fmt_time "$total_secs")${_fail_lines}${_other_line}" \
+"${_rep_ok} onnistui, ${#_rep_fail[@]} epäonnistui${_skip_note} — $(fmt_time "$total_secs")${_fail_lines}${_other_line}" \
         "$_prio"
 
-    log "═══ Enkoodaus valmis — yhteensä $(fmt_time "$total_secs") ═══"
+    log "═══ Enkoodaus valmis — yhteensä $(fmt_time "$total_secs") (${_rep_ok} onnistui, ${#_rep_fail[@]} epäonnistui${_skip_note}) ═══"
 
     # Muistuta lukuvirhelevyistä session lopussa
     while IFS= read -r mf; do
@@ -1360,9 +1499,10 @@ show_recent_reports() {
     for _d in "$OUTBASE"/session_*/; do
         local _r="${_d}.encode-report"
         [[ -f "$_r" ]] || continue
-        local _ok _fail _finished
+        local _ok _fail _skip _finished
         _ok=$(grep '^OK='       "$_r" 2>/dev/null | cut -d= -f2)
         _fail=$(grep '^FAIL='   "$_r" 2>/dev/null | cut -d= -f2)
+        _skip=$(grep '^SKIP='   "$_r" 2>/dev/null | cut -d= -f2)
         _finished=$(grep '^FINISHED=' "$_r" 2>/dev/null | cut -d= -f2-)
 
         # Kootaan sarjan/elokuvan/yms. nimet tästä sessiosta, ilman
@@ -1386,19 +1526,17 @@ show_recent_reports() {
         fi
 
         (( _any++ )) || true
-        local _total=$(( ${_ok:-0} + ${_fail:-0} ))
+        local _total=$(( ${_ok:-0} + ${_fail:-0} + ${_skip:-0} ))
         local _date="${_finished%% *}"
 
         if [[ "${_fail:-0}" == "0" ]]; then
             printf '  ✓ %-42s %d/%d OK  [%s]\n' "$_lbl" "$_total" "$_total" "$_date"
         else
-            printf '  ✗ %-42s %d/%d OK, %d epäonnistui  [%s]\n' \
-                "$_lbl" "${_ok:-0}" "$_total" "${_fail:-0}" "$_date"
-            local _ft _title _reason
-            while IFS='|' read -r _title _reason; do
-                printf '      ✗ %s\n' "$_title"
-                [[ -n "$_reason" ]] && printf '        %s\n' "${_reason# }"
-            done < <(grep '^FAIL_TITLE=' "$_r" | sed 's/^FAIL_TITLE=//')
+            local _skip_suffix=""
+            (( ${_skip:-0} > 0 )) && _skip_suffix=", ${_skip} ohitettu pysyvästi"
+            printf '  ✗ %-42s %d/%d OK, %d epäonnistui%s  [%s]\n' \
+                "$_lbl" "${_ok:-0}" "$_total" "${_fail:-0}" "$_skip_suffix" "$_date"
+            _print_fail_titles "$_d" "$_r" 0
         fi
     done
     if (( _any > 0 )); then
@@ -1464,10 +1602,7 @@ main() {
             local _rep="${d}.encode-report"
             if [[ -f "$_rep" ]] && [[ "$(grep '^FAIL=' "$_rep" 2>/dev/null | cut -d= -f2)" != "0" ]]; then
                 echo "      (edellisellä yrityksellä epäonnistui:)"
-                while IFS='|' read -r _title _reason; do
-                    printf '      ✗ %s\n' "$_title"
-                    [[ -n "$_reason" ]] && printf '        %s\n' "${_reason# }"
-                done < <(grep '^FAIL_TITLE=' "$_rep" | sed 's/^FAIL_TITLE=//')
+                _print_fail_titles "$d" "$_rep" 1
             fi
         done
         echo ""
