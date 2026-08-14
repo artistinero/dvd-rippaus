@@ -1453,7 +1453,23 @@ main() {
     if (( ${#pending[@]} > 0 )); then
         echo ""
         echo "  Löytyi ${#pending[@]} sessio(ta) enkoodaamattomalla datalla:"
-        for d in "${pending[@]}"; do echo "    ${d##*/}"; done
+        for d in "${pending[@]}"; do
+            echo "    $(basename "$d")"
+            # Jos tälle sessiolle on jo aiempi enkoodausraportti epäonnistumisilla,
+            # kerrotaan heti mitkä raidat kaatuivat ja miksi — muuten kysymys
+            # "käynnistetäänkö enkoodaus" näyttää siltä että data on vain
+            # kesken, vaikka todellisuudessa samat raidat ovat jo kertaalleen
+            # epäonnistuneet (esim. levyvaurio) ja todennäköisesti epäonnistuvat
+            # uudelleenkin samasta syystä.
+            local _rep="${d}.encode-report"
+            if [[ -f "$_rep" ]] && [[ "$(grep '^FAIL=' "$_rep" 2>/dev/null | cut -d= -f2)" != "0" ]]; then
+                echo "      (edellisellä yrityksellä epäonnistui:)"
+                while IFS='|' read -r _title _reason; do
+                    printf '      ✗ %s\n' "$_title"
+                    [[ -n "$_reason" ]] && printf '        %s\n' "${_reason# }"
+                done < <(grep '^FAIL_TITLE=' "$_rep" | sed 's/^FAIL_TITLE=//')
+            fi
+        done
         echo ""
         local enc_ok=""
         read -rp "  Käynnistetäänkö enkoodaus taustalle? (k/e): " enc_ok </dev/tty
