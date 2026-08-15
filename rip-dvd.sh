@@ -557,7 +557,12 @@ _session_has_pending_work() {
 # joten sen jäljelle jäänyt VOB-roska ei saa laukaista "jonossa"-tilaa eikä
 # vääristää session-otsikon nimeä jo valmiiksi enkoodatuilla levyillä.
 _session_pending_discs() {
-    local _sdir="$1" _dmf _ddir
+    # Normalisoidaan aina täsmälleen yhteen perässä olevaan "/" — ilman tätä
+    # kutsu ilman kauttaviivaa lopussa (esim. --skip/--encode-only saavat
+    # polun suoraan käyttäjältä) tuottaisi rikkinäisen globin
+    # "session_XXXdisc-*/meta.conf" ja palauttaisi hiljaa tyhjän tuloksen
+    # vaikka dataa oikeasti olisi.
+    local _sdir="${1%/}/" _dmf _ddir
     _session_has_pending_work "$_sdir" || return 0
     for _dmf in "$_sdir"disc-*/meta.conf; do
         [[ -f "$_dmf" ]] || continue
@@ -600,9 +605,9 @@ for line in sys.stdin.buffer:
 #   series/       → Sarjat kausikohtaisiin kansioihin (Jellyfin tunnistaa automaattisesti)
 #   movies/       → Elokuvat (nimi + vuosi)
 #   documentaries/→ Dokumentit (nimi + vuosi)
-#   Music videos/ → Musiikkivideot ja konsertit (nimi ilman vuotta)
-#   misc/         → Muu materiaali
-# Huom: "Music videos" isolla M:llä ja välilyönnillä — terastationilla olemassaoleva kansio.
+#   music/        → Musiikkivideot ja konsertit (nimi ilman vuotta)
+#   misc/         → Muu materiaali, oma kansionsa (käyttäjän vaatimuksesta 2026-08-15
+#                    palautettu — välissä oli hetken aikaa reititetty movies/-kansioon)
 dest_path() {
     local type="$1" name="$2" val="$3"
     case "$type" in
@@ -612,7 +617,7 @@ dest_path() {
     doc)     [[ -n "$val" ]] && printf '%s/documentaries/%s (%s)' "$DEST_ROOT" "$name" "$val" \
                              || printf '%s/documentaries/%s'      "$DEST_ROOT" "$name" ;;
     music)   printf '%s/music/%s'              "$DEST_ROOT" "$name" ;;
-    misc)    printf '%s/movies/%s'             "$DEST_ROOT" "$name" ;;
+    misc)    printf '%s/misc/%s'               "$DEST_ROOT" "$name" ;;
     esac
 }
 
