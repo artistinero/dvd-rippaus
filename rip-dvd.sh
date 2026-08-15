@@ -1946,7 +1946,12 @@ for line in sys.stdin.buffer:
                 ;;
             esac
             if [[ -n "$_mq_prompt" ]]; then
-                read -rp "${_mq_prompt}: " asked_max </dev/tty
+                # 180s aikakatkaisu: jos käyttäjä on jo mennyt nukkumaan eikä ole
+                # paikalla vastaamassa, tämä EI SAA jäädä ikuisesti odottamaan —
+                # muuten koko enkoodaus jäisi käynnistymättä koko yöksi (ks.
+                # feedback-bash-script-patterns: "read ilman -t blokkaa ikuisesti").
+                # Aikakatkaisulla oletus on sama kuin pelkkä Enter: kaikki samaan.
+                read -rp "${_mq_prompt} [180s → kaikki samaan]: " -t 180 asked_max </dev/tty || true
                 if [[ -n "$asked_max" ]]; then
                     if [[ "$asked_max" =~ ^[0-9]+$ ]]; then
                         p_max_ep="$asked_max"
