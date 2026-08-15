@@ -649,7 +649,7 @@ sanitize_name() {
 # voi esiintyä itse tiedoissa (tiedostonimissä tms.) — näin kutsuva koodi voi
 # jälkikäteen pilkkoa rivin takaisin erillisiksi tiedoiksi luotettavasti.
 ask_meta() {
-    local p_type="${1:-}" p_name="${2:-}" p_season="${3:-}" p_ep="${4:-}"
+    local p_type="${1:-}" p_name="${2:-}" p_season="${3:-}" p_ep="${4:-}" p_max_ep="${5:-}"
     echo "" >&2
 
     # Tyyppivalidointi silmukalla — hyväksyy vain tunnetut arvot
@@ -728,7 +728,17 @@ print(max(n)+1 if n else 0)" 2>/dev/null || echo 0)
         ep="${ep:-$suggest}"
         [[ "$ep" =~ ^[0-9]+$ ]] || { echo "  Jaksonumero ei kelpaa: '$ep'" >&2; return 1; }
         local max_ep=""
-        read -rp "Montako jaksoa levyllä (Enter = kysy rippauksen jälkeen): " max_ep
+        local mp="Montako jaksoa levyllä (Enter = kysy rippauksen jälkeen)"
+        # Jos edellisellä saman sarjan/kauden levyllä oli jo annettu MAX_EPISODES,
+        # ehdotetaan samaa lukua — useimmilla sarjoilla levyrakenne (jaksoja +
+        # ekstroja) on sama koko kauden ajan, joten sama luku toistuu levystä
+        # toiseen (ks. muistiinpanot esim. The Wire S04:stä).
+        if [[ -n "$p_max_ep" && "$p_type" == series && "$p_season" == "$val" ]]; then
+            mp="Montako jaksoa levyllä (Enter = ${p_max_ep}, kuten edellisellä levyllä)"
+        fi
+        read -rp "${mp}: " max_ep
+        [[ -z "$max_ep" && -n "$p_max_ep" && "$p_type" == series && "$p_season" == "$val" ]] \
+            && max_ep="$p_max_ep"
         if [[ -n "$max_ep" ]]; then
             [[ "$max_ep" =~ ^[0-9]+$ ]] || { echo "  Ei kelpaa: '$max_ep'" >&2; return 1; }
         fi
@@ -1650,6 +1660,10 @@ main() {
     # Edellisen levyn metatiedot oletuksina seuraavalle — käyttäjän ei tarvitse
     # kirjoittaa sarjan nimeä ja kautta uudelleen joka levylle
     local p_type="" p_name="" p_season="" p_ep="" p_max_ep=""
+    # p_max_ep nollataan joka levyn jälkeen (se on aina KYSEISEN levyn arvo).
+    # p_max_ep_suggest EI nollaannu — se muistaa viimeksi annetun luvun koko
+    # session ajan, jotta ask_meta() voi ehdottaa sitä seuraavallakin levyllä.
+    local p_max_ep_suggest=""
     local disc_num=0
 
     # ── Rippaussilmukka: lisää levyjä kunnes käyttäjä kirjoittaa 'q' ─────────
@@ -1664,9 +1678,10 @@ main() {
 
         # Kysy levyn metatiedot — palaa \x1F-eroteltuna merkkijonona
         local meta_str
-        meta_str=$(ask_meta "$p_type" "$p_name" "$p_season" "$p_ep")
+        meta_str=$(ask_meta "$p_type" "$p_name" "$p_season" "$p_ep" "$p_max_ep_suggest")
         IFS=$'\x1f' read -r p_type p_name p_season p_ep p_max_ep <<< "$meta_str"
         [[ -z "$p_name" ]] && continue  # Virhe syötteessä (esim. tyhjä nimi) — kysytään uudelleen
+        [[ -n "$p_max_ep" ]] && p_max_ep_suggest="$p_max_ep"
 
         # Näytetään yhteenveto juuri annetuista tiedoista ja pyydetään
         # käyttäjää vielä vahvistamaan ne ennen kuin mihinkään ryhdytään
@@ -1910,18 +1925,36 @@ for line in sys.stdin.buffer:
         echo ""
 
         # Jos MAX_EPISODES ei ole vielä asetettu, kysy nyt kun tiedot näkyvissä.
-        # VAIN sarjoille — MAX_EPISODES on tarkoitettu erottamaan jaksot
-        # ekstroista samalla levyllä (ks. dest_path/encode_session), elokuvalla
-        # tai muulla tyypillä käsite ei ole mielekäs eikä sitä koskaan lueta.
-        if [[ "$p_type" == series ]] && [[ -z "$p_max_ep" ]] && (( title_count > 0 )); then
-            local asked_max=""
-            read -rp "  Montako jaksoa (Enter = kaikki ${title_count}): " asked_max </dev/tty
-            if [[ -n "$asked_max" ]]; then
-                if [[ "$asked_max" =~ ^[0-9]+$ ]]; then
-                    p_max_ep="$asked_max"
-                    echo "MAX_EPISODES=${p_max_ep}" >> "${raw_dir}/meta.conf"
-                else
-                    echo "  Ei kelpaa: '${asked_max}' — ohitetaan (käytetään kaikki ${title_count})" >&2
+        # Sarjoilla tämä erottaa jaksot ekstroista. Elokuvilla/dokumenteilla
+        # sama mekanismi erottaa itse teoksen bonusmateriaalista — ilman tätä
+        # kaikki levyn "pitkät" raidat (myös featurette-tyyppiset ekstrat)
+        # nimetään juoksevasti "Part 01, 02, 03..." erottamattomina siitä mikä
+        # niistä oikeasti on elokuva (ks. Bender's Big Score -sekaannus, jossa
+        # itse 85 min elokuva oli "Part 01" muun 10 lyhyen ekstran joukossa).
+        # Musiikilla/misc:llä ei kysytä — harvemmin sama jakso/ekstra-tarve.
+        if [[ -z "$p_max_ep" ]] && (( title_count > 0 )); then
+            local asked_max="" _mq_prompt=""
+            case "$p_type" in
+            series)
+                _mq_prompt="  Montako jaksoa (Enter = kaikki ${title_count})"
+                ;;
+            movie)
+                (( title_count > 1 )) && _mq_prompt="  Montako ensimmäistä raitaa on itse elokuva — loput ekstroiksi (Enter = kaikki ${title_count} samaan)"
+                ;;
+            doc)
+                (( title_count > 1 )) && _mq_prompt="  Montako ensimmäistä raitaa on itse dokumentti — loput ekstroiksi (Enter = kaikki ${title_count} samaan)"
+                ;;
+            esac
+            if [[ -n "$_mq_prompt" ]]; then
+                read -rp "${_mq_prompt}: " asked_max </dev/tty
+                if [[ -n "$asked_max" ]]; then
+                    if [[ "$asked_max" =~ ^[0-9]+$ ]]; then
+                        p_max_ep="$asked_max"
+                        p_max_ep_suggest="$p_max_ep"
+                        echo "MAX_EPISODES=${p_max_ep}" >> "${raw_dir}/meta.conf"
+                    else
+                        echo "  Ei kelpaa: '${asked_max}' — ohitetaan (käytetään kaikki ${title_count})" >&2
+                    fi
                 fi
             fi
         fi
