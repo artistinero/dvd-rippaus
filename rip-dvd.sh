@@ -199,7 +199,7 @@ notify() {
 _wait_enter() {
     echo "" >&2
     echo "  Loki: $LOGFILE" >&2
-    echo "  [Paina VÄLILYÖNTIÄ sulkeaksesi — tai odota 3 min]" >&2
+    echo "  [Paina VÄLILYÖNTIÄ sulkeaksesi]" >&2
     # Välilyönti eikä Enter tahallaan: 'q'-komennon perässä tuleva Enter
     # (tai muu nopea näppäily) ei saa vahingossa sulkea juuri auennutta raporttia.
     [[ -e /dev/tty ]] || return
