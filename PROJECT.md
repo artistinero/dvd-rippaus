@@ -2,69 +2,97 @@
 
 ## Tavoite
 
-Ripata oma DVD-kokoelma MKV-tiedostoiksi Jellyfin-palvelimelle. Työnkulku:
-MakeMKV (häviötön raakakopiointi) + HandBrake (pakkaus H.265/MKV).
+Ripata oma DVD-kokoelma MKV-tiedostoiksi Jellyfin-mediapalvelimelle terastationille.
+Kaikki ajo tapahtuu brainbin-koneella. Käyttäjä ottaa SSH:lla yhteyden, käynnistää
+skriptin, syöttää levyjä ajuriin ja voi sen jälkeen sulkea läppärin — prosessit
+pyörivät tmux-sessioissa brainbinillä eivätkä riipu SSH-yhteydestä.
 
-## Palvelinympäristö (brainbin)
-
-- Ubuntu, headless
-- SSH: `ssh brainbin` (Tailscale MagicDNS, toimii ilman salasanaa)
-- DVD-asema: sisäänrakennettu (tunnistuu todennäköisesti `/dev/sr0`)
-- Jellyfin toiminnassa, musiikkikirjasto `/mnt/music`
-
-## Hakemistorakenne (brainbin, `/mnt/lacie2`)
+## Työkalu: `rip-dvd.sh`
 
 ```
-/mnt/lacie2/vids/dvd-rip/        <- väliaikainen rippaustyöhakemisto
-/mnt/lacie2/vids/movies/         <- valmiit elokuvat Jellyfiniin
-/mnt/lacie2/vids/series/         <- valmiit sarjat Jellyfiniin
-/mnt/lacie2/vids/music/          <- valmiit musiikkivideot Jellyfiniin
+rip-dvd.sh                                        Normaali rippaus + enkoodaus
+rip-dvd.sh --encode-only <hakemisto>               Enkoodaa olemassaoleva sessio uudelleen
+rip-dvd.sh --skip   <hakemisto> "<tiedostonimi>"   Luovu raidasta pysyvästi (peruttavissa)
+rip-dvd.sh --unskip <hakemisto> "<tiedostonimi>"   Peru luovutus, yritä uudelleen
+rip-dvd.sh --help                                  Ohje
 ```
 
-Valmis tiedosto siirretään käsin oikeaan hakemistoon rippauksen jälkeen.
+Sijainnit: paikallinen repo `rip-dvd.sh` ↔ brainbin `/usr/local/bin/rip-dvd.sh` —
+pidetään aina synkassa (scp + sudo cp), commitoidaan ja pushataan joka muutoksen jälkeen.
 
-## Työnkulku
+## Miksi dvdbackup eikä MakeMKV
 
-1. Levy asemaan brainbinilla
-2. MakeMKV ripaa häviöttömästi `/mnt/lacie2/vids/dvd-rip/<levyn-nimi>/`
-3. HandBrakeCLI pakkaa valitut titlet H.265 MKV-tiedostoiksi samaan kansioon
-4. Tarkistus: kuva, ääni, tekstitykset kunnossa
-5. Siirto oikeaan kansioon (`movies/`, `series/`, `music/`)
-6. Raakakopiot poistetaan levytilan säästämiseksi
+MakeMKV jää loputtomaan silmukkaan aluekoodittomilla/RPC2-asemilla. `dvdbackup` +
+`libdvdcss2` toimii aina — libdvdcss2 murtaa CSS-avaimet matemaattisesti eikä
+välitä aluekoodeista. MakeMKV on poistettu kokonaan käytöstä.
 
-## Ohjaus läppäriltä
+## Pipeline
 
-HandBraken graafinen käyttöliittymä läppärillä (Linux Mint 22.3) ohjaa
-brainbinin HandBrakeCLI:tä SSH:n kautta Remote Scan -toiminnolla.
-Vaihtoehtoisesti kaikki voidaan ajaa SSH-terminaalista käsin.
+1. **dvdbackup** kopioi DVD:n VIDEO_TS-rakenteen paikalliseen väliaikaishakemistoon
+   (`~/dvd-rip-tmp/session_YYYYMMDD_HHMMSS/disc-NNN/dvdbackup/`)
+2. **HandBrakeCLI** enkoodaa x265 CRF 21, kaikki ääniraidat (copy/AAC-fallback) ja
+   tekstitykset mukaan
+3. Siirto terastationille: `/mnt/terastation/dlna/vids/{series,movies,documentaries,music}/`
+4. Lähdekansio poistetaan vasta kun KAIKKI levyn raidat on varmistettu terastationilla
 
-## Asennettavat ohjelmat brainbinille
+Enkoodaus käynnistyy automaattisesti jokaisen ripatun levyn jälkeen (oma tmux-sessio
+per levy, `flock`-lukko varmistaa ettei kaksi HandBrake-prosessia pyöri yhtä aikaa —
+kriittistä ylikuumenemisen estämiseksi).
 
-- `makemkv` (beta, ilmainen lisenssiavain haetaan MakeMKV-foorumilta)
-- `handbrake-cli`
-- `libdvdcss2` (CSS-suojan purku, tarvitaan useimmille kaupallisille DVD:ille)
+## Asemat brainbinillä
 
-## Asennettavat ohjelmat läppärille
+`/dev/sr0` = sisäinen, **fyysisesti rikki, ei käytetä**. `/dev/sr1` = ulkoinen
+FREECOM_ USB-asema, ainoa toimiva.
 
-- `handbrake` (graafinen käyttöliittymä, valinnainen)
+## Tunnetut, pysyvästi menetetyt raidat
 
-## Enkoodausasetukset (HandBrake)
+Levyvaurio (`critical medium error` / `L-EC uncorrectable error` dmesg:ssä, ei
+korjattavissa ohjelmallisesti kohtuullisessa ajassa):
 
-- Kontti: MKV
-- Video: H.265 (HEVC), RF 20-22 (laatu vs. tiedostokoko)
-- Ääni: AC3/Dolby Digital pass-through (surround säilyy), tai AAC fallback
-- Tekstitykset: kaikki haluatut raidat mukaan (SRT tai PGS)
+| Teos | Puuttuu | Levy |
+|---|---|---|
+| Futurama S03 | E04, E05, Extra 06 | Disc 1, `READ_ERRORS=717` |
+| Futurama S03 | E21, E22 | Disc 4 (fyysinen), laaja ddrescue-yritys epäonnistui |
+| Futurama - Bender's Big Score | **koko elokuva** (85 min, muu levyn sisältö on tallessa) | 158× medium error, jätetty toistaiseksi sivuun `--skip`illä |
 
-## Huomioita
+Kaikki muut tähän mennessä ripatut sarjat/elokuvat/musiikkitallenteet ovat
+täydellisinä terastationilla.
 
-- MakeMKV beta-lisenssiavain vanhenee muutaman kuukauden välein.
-  Voimassa oleva avain löytyy aina: https://forum.makemkv.com/forum/viewtopic.php?t=1053
-- libdvdcss2 ei kuulu Ubuntun virallisiin repositorioihin, asennetaan
-  erillisestä lähteestä (videolan tai handbrake PPA).
-- Älä käynnistä Jellyfin-skannausta ennen kuin tiedostot ovat valmiissa
-  hakemistossaan, ei dvd-rip-välikansiossa.
+## `--skip`/`--unskip`: raidan valikoiva luovutus
 
-## Projektin tila
+Jos yksittäinen raita epäonnistuu toistuvasti eikä sitä kannata yrittää enää,
+`--skip` merkitsee sen pysyvästi ohitetuksi (`.skip-titles`-tiedosto sessiossa)
+ilman että lähde-VOB poistetaan. Skripti lakkaa kysymästä samasta raidasta
+uudelleen, mutta muut saman levyn/session raidat käsitellään normaalisti.
+Peruttavissa milloin tahansa `--unskip`illä.
 
-Asennusta ei ole aloitettu. Ensimmäinen tehtävä: asenna MakeMKV, HandBrakeCLI
-ja libdvdcss2 brainbinille, luo hakemistorakenne, testaa DVD-aseman tunnistus.
+**Diagnoosi ennen luovutusta:** tarkista aina `journalctl -k` (tai `dmesg -T`)
+kyseisen levyn tarkkaan rippausikkunaan (`meta.conf`:in aikaleima) ennen
+päätöstä yrittää uudelleen tai luovuttaa — osa epäonnistumisista (esim. rc=2
+"ei löydettyä titteliä", rc=139 "muistivirhe") ei liity levyvaurioon lainkaan
+ja korjautuu suoralla uusintayrityksellä. Vain aidosti toistuva
+`critical medium error` -kuvio samalla sektorialueella on oikea peruste
+luovuttaa.
+
+## Terastationin hakemistorakenne
+
+```
+/mnt/terastation/dlna/vids/
+├── movies/          elokuvat (+ scifi/, silent/ alakansiot)
+├── series/          sarjat (+ cartoons/ alakansio)
+├── documentaries/   dokumentit (+ propaganda/, docventures/ alakansiot)
+├── music/           konserttitallenteet ja musiikkivideot
+└── originals/       käyttäjän omat tuotannot
+```
+
+## Jellyfin
+
+Ekstrat nimetään Jellyfinin omalla `-extra`-päätteellä (esim.
+`Sarja S01 Extra 01-extra.mkv`) — ilman sitä Jellyfin tulkitsee numeron
+jaksonumeroksi ja peittää oikean jakson tai luo duplikaatin.
+
+## Tarkempi historia
+
+Yksityiskohtainen aikajana korjatuista bugeista, tehdyistä päätöksistä ja
+yksittäisten levyjen palautusyrityksistä on Claude Coden projektikohtaisessa
+muistissa, ei tässä tiedostossa.
