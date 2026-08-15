@@ -1904,8 +1904,11 @@ for line in sys.stdin.buffer:
         done <<< "$scan_result"
         echo ""
 
-        # Jos MAX_EPISODES ei ole vielä asetettu, kysy nyt kun tiedot näkyvissä
-        if [[ -z "$p_max_ep" ]] && (( title_count > 0 )); then
+        # Jos MAX_EPISODES ei ole vielä asetettu, kysy nyt kun tiedot näkyvissä.
+        # VAIN sarjoille — MAX_EPISODES on tarkoitettu erottamaan jaksot
+        # ekstroista samalla levyllä (ks. dest_path/encode_session), elokuvalla
+        # tai muulla tyypillä käsite ei ole mielekäs eikä sitä koskaan lueta.
+        if [[ "$p_type" == series ]] && [[ -z "$p_max_ep" ]] && (( title_count > 0 )); then
             local asked_max=""
             read -rp "  Montako jaksoa (Enter = kaikki ${title_count}): " asked_max </dev/tty
             if [[ -n "$asked_max" ]]; then
@@ -1913,7 +1916,7 @@ for line in sys.stdin.buffer:
                     p_max_ep="$asked_max"
                     echo "MAX_EPISODES=${p_max_ep}" >> "${raw_dir}/meta.conf"
                 else
-                    echo "  Ei kelpaa, ohitetaan" >&2
+                    echo "  Ei kelpaa: '${asked_max}' — ohitetaan (käytetään kaikki ${title_count})" >&2
                 fi
             fi
         fi
