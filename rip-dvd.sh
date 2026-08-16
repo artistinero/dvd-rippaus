@@ -2046,7 +2046,10 @@ for line in sys.stdin.buffer:
     local enc_sname="enc-$(basename "$session_dir" | sed 's/session_//')-d$(printf '%03d' "$disc_num")"
     echo "  Seuraa: tmux attach -t $enc_sname"
     echo ""
-    log "═══ Kaikki valmis! ═══"
+    # HUOM: EI "Kaikki valmis!" — se harhaanjohtaisi juuri yllä näytetyn
+    # enkoodausjonon (usein tunteja jäljellä) jälkeen. Vain TÄMÄ rippaus-
+    # sessio (levyjen syöttäminen) on valmis, enkoodaus jatkuu taustalla.
+    log "═══ Rippaus-sessio päättyy — enkoodaus jatkuu taustalla ═══"
 
     # Ilman tätä tmux-ikkuna (ja koko dvd-rip-sessio) sulkeutuu heti kun
     # main() palaa, ja yllä oleva raportti vilahtaa näytöllä näkymättömiin.
