@@ -897,9 +897,14 @@ encode_session() {
 
         # TITLE_COUNT tallennettiin rippausvaiheessa — vertailua varten
         local expected_count; expected_count=$(grep '^TITLE_COUNT=' "$mf" 2>/dev/null | cut -d= -f2 || echo "")
-        # MAX_EPISODES: valinnainen, rajoittaa montako titteliä enkoodataan jaksoiksi.
-        # Käytetään kun levy sisältää ekstroja jotka muuten saisivat väärän jaksonumeron.
+        # MAX_EPISODES: valinnainen, rajoittaa montako titteliä enkoodataan jaksoiksi
+        # (sarjoilla — jaksot ovat aina levyn alussa, ekstrat perässä, ks. ask_meta()).
         local max_episodes; max_episodes=$(grep '^MAX_EPISODES=' "$mf" 2>/dev/null | cut -d= -f2 || echo "")
+        # MOVIE_TITLE_NUM: valinnainen, elokuville/dokumenteille — kertoo TARKAN
+        # raitanumeron joka on itse teos (ei oleta että se olisi levyn ensimmäinen
+        # raita, toisin kuin MAX_EPISODES). Kaikki MUUT raidat (ennen ja jälkeen)
+        # tulevat ekstroiksi. Ks. main():n kysely rippauksen jälkeen.
+        local movie_title_num; movie_title_num=$(grep '^MOVIE_TITLE_NUM=' "$mf" 2>/dev/null | cut -d= -f2 || echo "")
         local dest; dest=$(dest_path "$type" "$name" "$season")
 
         # Tarkista että dvdbackup-hakemisto on olemassa.
@@ -922,9 +927,34 @@ encode_session() {
         while IFS= read -r t; do titles+=("$t"); done < <(hb_scan_long_titles "$dvd_dir")
         (( ${#titles[@]} == 0 )) && { log "VAROITUS: ei enkoodattavia raitoja — ${raw_dir##*/}"; continue; }
 
-        # Jaa raidat jaksoihin ja ekstraan MAX_EPISODES:in perusteella
+        # Jaa raidat itse teokseen ja ekstroihin. Kolme tapaa, tärkeysjärjestyksessä:
+        # 1) MOVIE_TITLE_NUM — tarkka raitanumero on itse teos, KAIKKI muut (missä
+        #    tahansa kohtaa levyä) ekstroja. Ei oleta sijaintia levyllä.
+        # 2) MAX_EPISODES — vanha, sarjoilla käytetty "ensimmäiset N raitaa"
+        #    -jaottelu. Toimii taaksepäin yhteensopivasti myös elokuville jos
+        #    MOVIE_TITLE_NUM puuttuu mutta MAX_EPISODES on jo asetettu (esim.
+        #    ennen 2026-08-16 kysytty vastaus).
+        # 3) Ei kumpaakaan — kaikki raidat samaan koriin, ei erottelua.
         local ep_titles=() extra_titles=()
-        if [[ -n "$max_episodes" ]] && (( max_episodes > 0 )) && (( ${#titles[@]} > max_episodes )); then
+        if [[ -n "$movie_title_num" ]]; then
+            local _t
+            for _t in "${titles[@]}"; do
+                if [[ "$_t" == "$movie_title_num" ]]; then
+                    ep_titles+=("$_t")
+                else
+                    extra_titles+=("$_t")
+                fi
+            done
+            if (( ${#ep_titles[@]} == 0 )); then
+                # Annettu raitanumero ei löytynyt (esim. levy skannautui eri
+                # tavalla tällä kertaa) — turvallisempi ohittaa jaottelu kokonaan
+                # kuin jättää elokuva vahingossa pois enkoodattavista.
+                log "  VAROITUS: MOVIE_TITLE_NUM=${movie_title_num} ei löytynyt raidoista — ei jaotella (${raw_dir##*/})"
+                ep_titles=("${titles[@]}"); extra_titles=()
+            else
+                log "  MOVIE_TITLE_NUM=${movie_title_num}: 1 teos + ${#extra_titles[@]} ekstraa (${raw_dir##*/})"
+            fi
+        elif [[ -n "$max_episodes" ]] && (( max_episodes > 0 )) && (( ${#titles[@]} > max_episodes )); then
             ep_titles=("${titles[@]:0:$max_episodes}")
             extra_titles=("${titles[@]:$max_episodes}")
             log "  MAX_EPISODES=${max_episodes}: ${#ep_titles[@]} jaksoa + ${#extra_titles[@]} ekstraa (${raw_dir##*/})"
@@ -1924,44 +1954,53 @@ for line in sys.stdin.buffer:
         done <<< "$scan_result"
         echo ""
 
-        # Jos MAX_EPISODES ei ole vielä asetettu, kysy nyt kun tiedot näkyvissä.
-        # Sarjoilla tämä erottaa jaksot ekstroista. Elokuvilla/dokumenteilla
-        # sama mekanismi erottaa itse teoksen bonusmateriaalista — ilman tätä
-        # kaikki levyn "pitkät" raidat (myös featurette-tyyppiset ekstrat)
-        # nimetään juoksevasti "Part 01, 02, 03..." erottamattomina siitä mikä
-        # niistä oikeasti on elokuva (ks. Bender's Big Score -sekaannus, jossa
-        # itse 85 min elokuva oli "Part 01" muun 10 lyhyen ekstran joukossa).
-        # Musiikilla/misc:llä ei kysytä — harvemmin sama jakso/ekstra-tarve.
-        if [[ -z "$p_max_ep" ]] && (( title_count > 0 )); then
-            local asked_max="" _mq_prompt=""
-            case "$p_type" in
-            series)
-                _mq_prompt="  Montako jaksoa (Enter = kaikki ${title_count})"
-                ;;
-            movie)
-                (( title_count > 1 )) && _mq_prompt="  Montako ensimmäistä raitaa on itse elokuva — loput ekstroiksi (Enter = kaikki ${title_count} samaan)"
-                ;;
-            doc)
-                (( title_count > 1 )) && _mq_prompt="  Montako ensimmäistä raitaa on itse dokumentti — loput ekstroiksi (Enter = kaikki ${title_count} samaan)"
-                ;;
-            esac
-            if [[ -n "$_mq_prompt" ]]; then
-                # 180s aikakatkaisu: jos käyttäjä on jo mennyt nukkumaan eikä ole
-                # paikalla vastaamassa, tämä EI SAA jäädä ikuisesti odottamaan —
-                # muuten koko enkoodaus jäisi käynnistymättä koko yöksi (ks.
-                # feedback-bash-script-patterns: "read ilman -t blokkaa ikuisesti").
-                # Aikakatkaisulla oletus on sama kuin pelkkä Enter: kaikki samaan.
-                read -rp "${_mq_prompt} [180s → kaikki samaan]: " -t 180 asked_max </dev/tty || true
-                if [[ -n "$asked_max" ]]; then
-                    if [[ "$asked_max" =~ ^[0-9]+$ ]]; then
-                        p_max_ep="$asked_max"
-                        p_max_ep_suggest="$p_max_ep"
-                        echo "MAX_EPISODES=${p_max_ep}" >> "${raw_dir}/meta.conf"
-                    else
-                        echo "  Ei kelpaa: '${asked_max}' — ohitetaan (käytetään kaikki ${title_count})" >&2
-                    fi
+        # Jos MAX_EPISODES/MOVIE_TITLE_NUM ei ole vielä asetettu, kysy nyt kun
+        # tiedot näkyvissä. Sarjoilla erottaa jaksot ekstroista (MAX_EPISODES:
+        # "ensimmäiset N raitaa", koska jaksot ovat aina levyn alussa). Elokuvilla
+        # /dokumenteilla erottaa itse teoksen bonusmateriaalista TARKALLA
+        # raitanumerolla (MOVIE_TITLE_NUM) — ei oleta että teos olisi levyn
+        # ensimmäinen raita, toisin kuin alkuperäinen "montako ensimmäistä"
+        # -kysymys teki (käyttäjän 2026-08-16 huomauttama sanamuoto-/logiikkavirhe:
+        # numero ei kertonut MIKÄ raita on elokuva vaan MONTAKO ensimmäistä on).
+        # Ilman tätä kaikki levyn "pitkät" raidat (myös featurette-tyyppiset
+        # ekstrat) nimetään juoksevasti "Part 01, 02, 03..." erottamattomina
+        # (ks. Bender's Big Score -sekaannus, jossa itse 85 min elokuva oli
+        # "Part 01" muun 10 lyhyen ekstran joukossa). Musiikilla/misc:llä ei kysytä.
+        if [[ "$p_type" == series ]] && [[ -z "$p_max_ep" ]] && (( title_count > 0 )); then
+            local asked_max=""
+            # 180s aikakatkaisu (ks. feedback-bash-script-patterns: "read ilman -t
+            # blokkaa ikuisesti") — jos käyttäjä on mennyt nukkumaan, tämä EI SAA
+            # jäädä ikuisesti odottamaan. Oletus aikakatkaisulla = kuin pelkkä Enter.
+            read -rp "  Montako jaksoa (Enter = kaikki ${title_count}) [180s → kaikki samaan]: " -t 180 asked_max </dev/tty || true
+            if [[ -n "$asked_max" ]]; then
+                if [[ "$asked_max" =~ ^[0-9]+$ ]]; then
+                    p_max_ep="$asked_max"
+                    p_max_ep_suggest="$p_max_ep"
+                    echo "MAX_EPISODES=${p_max_ep}" >> "${raw_dir}/meta.conf"
+                else
+                    echo "  Ei kelpaa: '${asked_max}' — ohitetaan (käytetään kaikki ${title_count})" >&2
                 fi
             fi
+        elif [[ "$p_type" == movie || "$p_type" == doc ]] && (( title_count > 1 )); then
+            local _mtn_lbl="elokuva"; [[ "$p_type" == doc ]] && _mtn_lbl="dokumentti"
+            # Oletusraita jos ei vastata: pisin raita on lähes aina itse teos —
+            # ekstrat/featurettet ovat tyypillisesti selvästi lyhyempiä.
+            local _longest_t; _longest_t=$(printf '%s\n' "$scan_result" | awk -F'\t' '
+                { split($2, h, ":"); s = h[1]*3600 + h[2]*60 + h[3]
+                  if (s > max) { max = s; t = $1 } }
+                END { print t }')
+            local asked_movie=""
+            read -rp "  Mikä raita on itse ${_mtn_lbl}? (Enter = pisin, raita ${_longest_t}) [180s → raita ${_longest_t}]: " -t 180 asked_movie </dev/tty || true
+            local movie_title_num="$asked_movie"
+            if [[ -z "$movie_title_num" ]]; then
+                movie_title_num="$_longest_t"
+            elif ! [[ "$movie_title_num" =~ ^[0-9]+$ ]] || \
+                 ! printf '%s\n' "$scan_result" | cut -f1 | grep -qFx "$movie_title_num"; then
+                echo "  Ei löydy tällaista raitaa: '${asked_movie}' — käytetään pisin (raita ${_longest_t})" >&2
+                movie_title_num="$_longest_t"
+            fi
+            echo "MOVIE_TITLE_NUM=${movie_title_num}" >> "${raw_dir}/meta.conf"
+            log "  Itse ${_mtn_lbl}: raita ${movie_title_num} (${title_count} raitaa yhteensä)"
         fi
 
         log "Levy ${disc_num} ripattuna (${title_count} raitaa${p_max_ep:+, MAX_EPISODES=${p_max_ep}})."
