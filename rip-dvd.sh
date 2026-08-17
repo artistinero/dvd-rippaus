@@ -936,7 +936,13 @@ encode_session() {
         #    ennen 2026-08-16 kysytty vastaus).
         # 3) Ei kumpaakaan — kaikki raidat samaan koriin, ei erottelua.
         local ep_titles=() extra_titles=()
-        if [[ -n "$movie_title_num" ]]; then
+        if [[ "$movie_title_num" == "0" ]]; then
+            # Erillinen bonuslevy — ei itse teosta lainkaan tällä levyllä,
+            # KAIKKI raidat ekstroiksi (esim. levy 2/3/4/5 kun elokuva ja osa
+            # ekstroista on jo ripattu eri levyltä samalla nimellä).
+            extra_titles=("${titles[@]}")
+            log "  MOVIE_TITLE_NUM=0: ei itse teosta tällä levyllä, ${#extra_titles[@]} ekstraa (${raw_dir##*/})"
+        elif [[ -n "$movie_title_num" ]]; then
             local _t
             for _t in "${titles[@]}"; do
                 if [[ "$_t" == "$movie_title_num" ]]; then
@@ -2004,17 +2010,26 @@ for line in sys.stdin.buffer:
                   if (s > max) { max = s; t = $1 } }
                 END { print t }')
             local asked_movie=""
-            read -rp "  Mikä raita on itse ${_mtn_lbl}? (Enter = pisin, raita ${_longest_t}) [180s → raita ${_longest_t}]: " -t 180 asked_movie </dev/tty || true
+            # "0" = erikoisarvo: TÄLLÄ levyllä ei ole itse teosta lainkaan, vain
+            # ekstroja (esim. erillinen bonuslevy). Kaikki raidat menevät silloin
+            # ekstroiksi saman nimen alle, ei yritetä arvata mikä olisi "elokuva".
+            read -rp "  Mikä raita on itse ${_mtn_lbl}? (Enter = pisin, raita ${_longest_t} / 0 = ei tällä levyllä, kaikki ekstroja) [180s → raita ${_longest_t}]: " -t 180 asked_movie </dev/tty || true
             local movie_title_num="$asked_movie"
             if [[ -z "$movie_title_num" ]]; then
                 movie_title_num="$_longest_t"
+            elif [[ "$movie_title_num" == "0" ]]; then
+                : # sellaisenaan — käsitellään erikseen alla ja encode_session():issa
             elif ! [[ "$movie_title_num" =~ ^[0-9]+$ ]] || \
                  ! printf '%s\n' "$scan_result" | cut -f1 | grep -qFx "$movie_title_num"; then
                 echo "  Ei löydy tällaista raitaa: '${asked_movie}' — käytetään pisin (raita ${_longest_t})" >&2
                 movie_title_num="$_longest_t"
             fi
             echo "MOVIE_TITLE_NUM=${movie_title_num}" >> "${raw_dir}/meta.conf"
-            log "  Itse ${_mtn_lbl}: raita ${movie_title_num} (${title_count} raitaa yhteensä)"
+            if [[ "$movie_title_num" == "0" ]]; then
+                log "  Ei itse ${_mtn_lbl}ta tällä levyllä — kaikki ${title_count} raitaa ekstroiksi"
+            else
+                log "  Itse ${_mtn_lbl}: raita ${movie_title_num} (${title_count} raitaa yhteensä)"
+            fi
         fi
 
         log "Levy ${disc_num} ripattuna (${title_count} raitaa${p_max_ep:+, MAX_EPISODES=${p_max_ep}})."
