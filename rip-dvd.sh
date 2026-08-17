@@ -1177,7 +1177,14 @@ encode_session() {
         local rc=$?
 
         local t_secs=$(( $(date +%s) - t_start ))
-        if (( rc == 0 )) && [[ -s "$out" ]]; then
+        # HUOM: pelkkä "-s" (tiedosto olemassa, ei tyhjä) EI riitä — korruptoitunut
+        # lähde voi saada HandBraken palauttamaan rc=0 vaikka se tuotti vain
+        # muutaman tavun käyttökelvotonta dataa (havaittu käytännössä 2026-08-17,
+        # District 9: 4 tiedostoa ~4-5 KB merkittiin "✓ onnistui" terastationille
+        # asti). Sama 1 MB -raja kuin muuallakin skriptissä "onko tämä oikeasti
+        # valmis tiedosto" -tarkistuksissa (Tarkistus 1/2, safety-net-siivous).
+        local out_sz_bytes; out_sz_bytes=$(stat -c%s "$out" 2>/dev/null || echo 0)
+        if (( rc == 0 )) && (( out_sz_bytes > 1048576 )); then
             local sz; sz=$(du -sh "$out" | cut -f1)
             local final="${enc_dir}/${out_name}"
             # Tiedosto nimetään ensin väliaikaisella ".tmp"-päätteellä ja vasta
@@ -1208,15 +1215,22 @@ encode_session() {
             # selitykseksi, jotta lokista näkee heti mistä oli kyse ilman että
             # numeroa tarvitsee erikseen googlettaa.
             local rc_note=""
-            case "$rc" in
-                124) rc_note=" (aikakatkaisu — HandBrake jumissa yli $(fmt_time "$ENC_TIMEOUT"))" ;;
-                137) rc_note=" (tapettiin väkisin — todennäköisesti ylikuumeneminen)" ;;
-                139) rc_note=" (HandBrake kaatui muistivirheeseen)" ;;
-                141) rc_note=" (yhteys HandBrakeen katkesi kesken kaiken)" ;;
-                130) rc_note=" (keskeytetty, esim. Ctrl+C)" ;;
-                  2) rc_note=" (HandBrake: ei löydettyä titteliä — korruptoitunut lähde?)" ;;
-                  5) rc_note=" (HandBrake kaatui hiljaa kesken ajon, ei virheviestiä — tässä projektissa tähän mennessä liittynyt aina lähteen datavaurioon, ei skriptin bugiin)" ;;
-            esac
+            if (( rc == 0 )); then
+                # HandBrake ITSE ilmoitti onnistuneensa mutta tuotos on epäilyttävän
+                # pieni — käytännössä sama korruptoitunut-lähde-oire kuin rc=2:lla,
+                # HandBrake vain ei tällä kertaa huomannut/raportoinut sitä itse.
+                rc_note=" (HandBrake ilmoitti onnistuneensa mutta tuotos vain ${out_sz_bytes} tavua — todennäköisesti korruptoitunut lähde)"
+            else
+                case "$rc" in
+                    124) rc_note=" (aikakatkaisu — HandBrake jumissa yli $(fmt_time "$ENC_TIMEOUT"))" ;;
+                    137) rc_note=" (tapettiin väkisin — todennäköisesti ylikuumeneminen)" ;;
+                    139) rc_note=" (HandBrake kaatui muistivirheeseen)" ;;
+                    141) rc_note=" (yhteys HandBrakeen katkesi kesken kaiken)" ;;
+                    130) rc_note=" (keskeytetty, esim. Ctrl+C)" ;;
+                      2) rc_note=" (HandBrake: ei löydettyä titteliä — korruptoitunut lähde?)" ;;
+                      5) rc_note=" (HandBrake kaatui hiljaa kesken ajon, ei virheviestiä — tässä projektissa tähän mennessä liittynyt aina lähteen datavaurioon, ei skriptin bugiin)" ;;
+                esac
+            fi
             log "  VIRHE: enkoodaus epäonnistui — ${out_name} (rc=${rc}${rc_note}, $(fmt_time "$t_secs"))"
             log "         Jos tämä toistuu eikä kannata enää yrittää: rip-dvd.sh --skip '${session_dir}' \"${out_name}\""
             _rep_fail+=("${out_name}|rc=${rc}${rc_note}")
