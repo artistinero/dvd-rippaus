@@ -391,6 +391,14 @@ run_hb() {
     # videomuunnokseen — ne ovat täysin toisistaan riippumattomia.
     local tmpout; tmpout=$(mktemp --tmpdir "rip-dvd-hb-XXXXXX.log")
 
+    # --no-dvdnav: käyttää libdvdread-kirjastoa HandBraken oletuksena olevan
+    # libdvdnav:in sijaan. Lisätty 2026-08-18 epäillyn tekstitys-synkkabugin
+    # takia (ks. muistiinpanot) — libdvdnav on yleisesti luotettavampi mutta
+    # tunnetusti epäluotettavampi juuri monikerroslevyillä/solunavigoinnissa,
+    # mikä sopii havaittuun oireeseen (tekstitysraidan ajastus hyppää kesken
+    # tiedoston, kuva ei). EI VIELÄ VARMISTETTU korjaavan itse ongelmaa —
+    # perustuu dokumentoituun HandBraken tunnettuun eroon näiden kirjastojen
+    # välillä, ei suoraan testattuun todisteeseen että tämä juuri korjaa sen.
     HandBrakeCLI \
         --input "$1" "${title_arg[@]}" --output "$2" \
         --encoder x265 --quality 21 \
@@ -398,6 +406,7 @@ run_hb() {
         --loose-anamorphic --crop-mode auto \
         --all-audio --aencoder copy --audio-fallback aac \
         --all-subtitles --markers \
+        --no-dvdnav \
         </dev/null >"$tmpout" 2>&1 &
     # </dev/null on tärkeä yksityiskohta: tämä funktio kutsutaan aina jonkin
     # silmukan (esim. "käy läpi kaikki raidat") sisältä. Ilman tätä HandBrake
@@ -581,7 +590,10 @@ _session_pending_discs() {
 # muuntaa). Tämä tutkiminen kestää yleensä 5–15 sekuntia per levy.
 hb_scan_long_titles() {
     local dvd_dir="$1"
-    HandBrakeCLI -i "$dvd_dir" -t 0 --scan </dev/null 2>&1 | python3 -c "
+    # --no-dvdnav: sama kirjastovalinta kuin run_hb():ssa (ks. sen kommentti) —
+    # skannaus ja enkoodaus käyttävät aina samaa DVD-lukukirjastoa keskenään,
+    # ettei niiden tulkinta levyn rakenteesta pääse eroamaan toisistaan.
+    HandBrakeCLI -i "$dvd_dir" -t 0 --scan --no-dvdnav </dev/null 2>&1 | python3 -c "
 import sys, re
 min_dur = $MIN_DURATION
 cur = None
@@ -1950,7 +1962,8 @@ for u, d in [('G', 1024**3), ('M', 1024**2)]:
         log "dvdbackup onnistui (${vob_count} VOB). Skannataan raidat..."
         local dvd_inner; dvd_inner=$(find "$dv_dir" -mindepth 1 -maxdepth 1 -type d | head -1)
         local scan_result
-        scan_result=$(HandBrakeCLI -i "$dvd_inner" -t 0 --scan </dev/null 2>&1 | python3 -c "
+        # --no-dvdnav: ks. run_hb():n kommentti samasta lipusta.
+        scan_result=$(HandBrakeCLI -i "$dvd_inner" -t 0 --scan --no-dvdnav </dev/null 2>&1 | python3 -c "
 import sys, re
 min_dur = $MIN_DURATION
 cur = None
