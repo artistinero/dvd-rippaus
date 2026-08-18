@@ -869,7 +869,9 @@ encode_session() {
 
     # Poista kesken jääneet .tmp-tiedostot — virransyötön tai kaatumisen jäänne.
     # Ilman tätä ne jäisivät ikuisesti enc_dir:iin tilaa viemään.
-    find "$session_dir" -name "*.mkv.tmp" -delete 2>/dev/null || true
+    # Nimikaava ".tmp.mkv" (tmp ENNEN oikeaa päätettä) — ks. kommentti alempana
+    # miksi ".mkv.tmp" oli väärin päin ja aiheutti MP4-kontteribugin.
+    find "$session_dir" -name "*.tmp.mkv" -delete 2>/dev/null || true
 
     # ── Levytilan tarkistus enkoodauksen alussa ──────────��────────────────────
     # Enkoodaus voi kestää tunteja — varmista ennen aloitusta että tilaa riittää.
@@ -1149,7 +1151,7 @@ encode_session() {
             rm -f "$_enc_out"
         else
             # Siivoa mahdollinen vajaa/vioittunut enc_dir-tiedosto
-            rm -f "${enc_dir}/${out_name}" "${enc_dir}/${out_name}.tmp"
+            rm -f "${enc_dir}/${out_name}" "${enc_dir}/${out_name%.mkv}.tmp.mkv"
         fi
 
         # ── Edistymisraportti ─────────────────────────────────────────────────
@@ -1171,7 +1173,20 @@ encode_session() {
 
         # ── Enkoodaus ─────────────────────────────────────────────────────────
         local t_start; t_start=$(date +%s)
-        local out="${enc_dir}/${out_name}.tmp"
+        # HUOM (2026-08-19, VAKAVA BUGI LÖYTYI JA KORJATTU): väliaikaistiedoston
+        # nimessä ".tmp" EI SAA olla viimeisenä päätteenä ("Nimi.mkv.tmp") —
+        # HandBrake päättelee tallennusmuodon (MKV vs MP4) --output-polun
+        # VIIMEISESTÄ päätteestä. Kun se näki ".tmp":n eikä tunnistanut sitä,
+        # se kirjoitti sisällön MP4-muodossa HandBraken oletusarvon mukaan,
+        # vaikka lopullinen tiedosto nimettiin myöhemmin .mkv:ksi (mv poistaa
+        # vain .tmp:n, ei muuta sisältöä). Tulos: tiedosto NÄYTTÄÄ .mkv:ltä
+        # mutta on sisällöltään MP4 — mkvextract/mkvmerge hylkäävät sen
+        # ("no EBML head found"), vaikka ffprobe/soitin lukevat sen silti
+        # (tunnistavat sisällön eivätkä välitä tiedostopäätteestä). Löytyi kun
+        # mkvextract epäonnistui täysin toimivalta näyttävälle tiedostolle.
+        # KORJAUS: ".mkv" pysyy aina VIIMEISENÄ päätteenä, "tmp" siirretty
+        # ennen sitä ("Nimi.tmp.mkv").
+        local out="${enc_dir}/${out_name%.mkv}.tmp.mkv"
         local src_sz; src_sz=$(du -sh "$src" 2>/dev/null | cut -f1 || echo "?")
 
         # Luo kohdepolku terastationilla — retry jos verkko katkaisi
