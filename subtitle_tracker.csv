@@ -1,6 +1,6 @@
 teos,kesto_min,tila,korjattu_levylta,huomiot,tiedostopolku
 Elämä on Pythonia (1971),85,RIKKI,EI,Käyttäjä vahvisti katsoessaan 2026-08-18 — automaattitunnistin EI löytänyt tätä (nopea dialogi peittää signaalin),/mnt/terastation/dlna/vids/movies/Elämä on Pythonia (1971)/Elämä on Pythonia.mkv
-"Woody Allen - Manhattan, Movies & Me (2011)",108,RIKKI,EI,Vahvistettu ffprobe-analyysillä 2026-08-18: tekstitys hyppää 0.76s n. 50min kohdalla,"/mnt/terastation/dlna/vids/documentaries/Woody Allen - Manhattan, Movies & Me (2011)/Woody Allen - Manhattan, Movies & Me - Part 01.mkv"
+"Woody Allen - Manhattan, Movies & Me (2011)",108,RIKKI,EI,"Käyttäjä vahvisti katsoessaan: tekstitys sekaisin (""mullin mallin"") alusta lähtien, ei myöhemmin hyppäävä. AIEMPI ffprobe-analyysin ""hyppää 50min kohdalla"" -löydös oli tämän epäluotettavan heuristiikan harhaanjohtava tulos, ei todellinen kuvaus viasta — poistettu tästä.","/mnt/terastation/dlna/vids/documentaries/Woody Allen - Manhattan, Movies & Me (2011)/Woody Allen - Manhattan, Movies & Me - Part 01.mkv"
 101 Reykjavik (2000),85,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/101 Reykjavik (2000)/101 Reykjavik.mkv
 12 apinaa (1995),124,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/12 apinaa (1995)/12 apinaa - Part 01.mkv
 12 apinaa (1995),88,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/12 apinaa (1995)/12 apinaa - Part 02.mkv

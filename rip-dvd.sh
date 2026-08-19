@@ -376,6 +376,47 @@ wait_for_terastation() {
 #   kuvasuhde ja reunojen rajaus säädetään automaattisesti alkuperäisen
 #   DVD:n mukaiseksi
 #
+# Minimi ylärajaus pikseleinä. The Wire -levyiltä (ja mahdollisesti muilta
+# samantyyppisiltä lähteiltä) löytyi 2026-08-19 n. 4 pikselin rivi kohinaa/
+# VBI-jäännöstä kuvan aivan yläreunassa (mitattu suoraan pikseliarvoista:
+# rivit 0-2 keskikirkkaus ~26, rivi 3 siirtymä ~19, rivi 4+ normaali kuva
+# ~12) — se ei ole tarpeeksi tummaa jotta HandBraken automaattinen
+# --crop-mode auto tunnistaisi sen mustaksi reunaksi ja poistaisi sen.
+# Pakotetaan siis vähintään tämä verran ylärajausta aina, automaattisen
+# tunnistuksen löytämän arvon PÄÄLLE (ei sen sijaan). 6px on häviävän pieni
+# osa kuvan korkeudesta (alle 1% PAL:n 576 pikselistä) eikä siis leikkaa
+# havaittavasti oikeaa kuvasisältöä levyillä joilla tätä häiriötä ei ole.
+readonly MIN_TOP_CROP_PX=6
+
+# Selvittää HandBraken automaattisesti laskeman rajausarvon skannaamalla
+# annetun otsikon, ja palauttaa liput ("--crop-mode custom --crop T:B:L:R")
+# joissa yläraja on nostettu vähintään MIN_TOP_CROP_PX:ään — muut reunat
+# (ala, vasen, oikea) jäävät täysin automaattitunnistuksen varaan, koska ne
+# vaihtelevat oikeutetusti levyn kuvasuhteen mukaan eikä niissä ole havaittu
+# vastaavaa häiriötä. Jos skannaus epäonnistuu (esim. vioittunut levy),
+# palataan turvallisesti tavalliseen automaattitilaan sen sijaan että koko
+# rippaus kaatuisi tähän.
+_get_crop_args() {
+    local input="$1" title_num="$2"
+    local title_arg=()
+    [[ -n "$title_num" ]] && title_arg=(--title "$title_num")
+    local scan_out
+    scan_out=$(HandBrakeCLI --input "$input" "${title_arg[@]}" --no-dvdnav --scan 2>&1 </dev/null)
+    local line
+    line=$(grep -o 'autocrop: [0-9]*/[0-9]*/[0-9]*/[0-9]*' <<<"$scan_out" | head -1)
+    if [[ -z "$line" ]]; then
+        echo "--crop-mode auto"
+        return
+    fi
+    local vals="${line#autocrop: }"
+    local top="${vals%%/*}"; vals="${vals#*/}"
+    local bottom="${vals%%/*}"; vals="${vals#*/}"
+    local left="${vals%%/*}"; vals="${vals#*/}"
+    local right="$vals"
+    (( top < MIN_TOP_CROP_PX )) && top=$MIN_TOP_CROP_PX
+    echo "--crop-mode custom --crop ${top}:${bottom}:${left}:${right}"
+}
+
 # Paluuarvo: kertoo onnistuiko muunnos (0 = onnistui, muu luku = jokin meni
 # pieleen — tarkempi selitys eri lukujen merkityksestä löytyy kutsuvasta
 # koodista jossa näitä lukuja tulkitaan).
@@ -391,6 +432,8 @@ run_hb() {
     # videomuunnokseen — ne ovat täysin toisistaan riippumattomia.
     local tmpout; tmpout=$(mktemp --tmpdir "rip-dvd-hb-XXXXXX.log")
 
+    local crop_args; read -ra crop_args <<< "$(_get_crop_args "$1" "${3:-}")"
+
     # --no-dvdnav: käyttää libdvdread-kirjastoa HandBraken oletuksena olevan
     # libdvdnav:in sijaan. Lisätty 2026-08-18 epäillyn tekstitys-synkkabugin
     # takia (ks. muistiinpanot) — libdvdnav on yleisesti luotettavampi mutta
@@ -403,7 +446,7 @@ run_hb() {
         --input "$1" "${title_arg[@]}" --output "$2" \
         --encoder x265 --quality 21 \
         --comb-detect --decomb \
-        --loose-anamorphic --crop-mode auto \
+        --loose-anamorphic "${crop_args[@]}" \
         --all-audio --aencoder copy --audio-fallback aac \
         --all-subtitles --markers \
         --no-dvdnav \
