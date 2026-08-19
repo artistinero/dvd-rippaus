@@ -112,6 +112,16 @@ säilytetty varmuuskopiona: `/home/keitsi/dvd-rip-tmp/_vanhat_ennen_tekstityskor
 Testikansiot (`_TESTI Elämä on Pythonia ...`) poistettu terastationilta. Jellyfin päivitetty.
 `subtitle_tracker.csv` päivitetty: RIKKI → KUNNOSSA.
 
+## session_20260818_003843 valmistui (19:09) — 3/3 pääelokuvaa onnistui
+
+Broken Flowers, The Blues Brothers, Blues Brothers 2000 — kaikki uudella HandBrakella, uudella
+mitatulla crop-korjauksella, `-extra`-nimeämiskorjauksella. Kaikki kolme löytyvät nyt kirjastosta.
+5/10 raitaa epäonnistui — kaikki ekstroja, aitoja levyvirheitä ("ei löydettyä titteliä" tai
+epäilyttävän pieni tuotos, esim. 1044843 tavua). Skripti tunnisti nämä oikein epäonnistuneiksi
+(myös rc=0-mutta-liian-pieni-tapaukset) sen sijaan että olisi hyväksynyt roskadatan — hyvä merkki,
+sama validointi joka puuttui aiemmin "onnistui ≠ oikein" -tapauksissa toimii nyt oikein.
+Yksityiskohdat: `/home/keitsi/dvd-rip-tmp/session_20260818_003843/.encode-report`.
+
 ## Pieni, ei-blokkaava sivuvirhe havaittu (ei vielä diagnosoitu)
 
 Broken Flowers -session lokissa näkyi `sed: -e expression #1, char 4: unterminated 's' command`
