@@ -234,3 +234,10 @@ aiemmin tänään) eivät vielä saaneet tekstityskorjausta — myös nämä odo
 Käyttäjä ei löydä fyysistä levyä. Jää odottamaan kunnes levy löytyy. Huomio: tämä teos oli myös
 aiemmin tänään mitatussa crop-häiriölistalla ("2046 - Part 04", top=3.8 vs alla=2.2) — kun levy
 joskus löytyy, kannattaa hoitaa sekä tekstityskorjaus että crop-korjaus samalla kertaa.
+
+## 2001- Avaruusseikkailu Part01 — UUDELLEENTEHTY OIKEIN (19:58)
+
+Korjattu tekstiskannauksen katkeamisbugi huomioiden: JSON-skannaus vahvisti 11 tekstitysraitaa
+(ei 10). Uusi irrotus 552s, remux 31s. 14 raitaa (video+2ääni+11tekstitys), kesto täsmää
+(8565,568s). Vanha (10-raitainen, väärä) versio säilytetty varmuuskopiona nimellä
+"...(v1 10raitaa, korvattu).mkv". Kelkka avattu.
