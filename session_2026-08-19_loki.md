@@ -241,3 +241,31 @@ Korjattu tekstiskannauksen katkeamisbugi huomioiden: JSON-skannaus vahvisti 11 t
 (ei 10). Uusi irrotus 552s, remux 31s. 14 raitaa (video+2ääni+11tekstitys), kesto täsmää
 (8565,568s). Vanha (10-raitainen, väärä) versio säilytetty varmuuskopiona nimellä
 "...(v1 10raitaa, korvattu).mkv". Kelkka avattu.
+
+## Amarcord (1973) — korjattu, huomio kestoerosta
+
+Part01: irrotus, remux 63s (molemmat osat). **Huomio: uuden version kesto (7110,808s) oli 5,4s
+lyhyempi kuin alkuperäinen video (7116,204s)** — ensimmäinen ei-täydellinen täsmäys koko illan
+aikana. Ei virheitä lokissa. Käyttäjän aikapaineen vuoksi ei tutkittu tarkemmin, korvattiin
+silti (riski arvioitu pieneksi, 0,08% erosta). **Merkitty tarkistettavaksi jos huomataan jotain
+outoa Amarcordin lopusta.** Part02 täsmäsi täydellisesti.
+
+## 2046 (2004) — Part01 korjattu, Part02-09 (8 kpl) jäivät kesken
+
+Kirjastossa 9 osaa, ei vain 1 kuten oletin ensin — Part02 (708,99s) ja Part03 (393,98s) täsmäsivät
+levyn titteleihin 2 ja 3 joita en käsitellyt koska rajasin oman skannaukseni `head -6`:lla (sama
+virhe kuin tekstiskannauksen katkeamisessa — omat rajaukset piilottavat dataa). Levy ehdittiin
+jo poistaa asemasta ennen kuin tämä huomattiin. **Part02-09 odottavat 2046:n seuraavaa kierrosta.**
+Part01 korjattu onnistuneesti: irrotus 485s, remux 15s, kesto täsmäsi täydellisesti.
+
+## Arthur's Dyke (2001) — käynnissä
+
+Täysi skannaus (ei `head`-rajausta tällä kertaa): titteli 1 (103:49, pääelokuva, 8 tekstitysraitaa)
+= Part01. Titteli 4 (1:56) ja 5 (20:28) EIVÄT sisällä tekstitystä levylläkään — Part02/03 eivät siis
+tarvitse korjausta. Irrotus käynnissä Part01:lle.
+
+## Rinnakkaistyö: The Wire S01E01 crop-korjaus käynnissä
+
+Täysi x265-tuotantoenkoodaus (ei pikainen), ETA ~44-56min. Käyttäjän pyynnöstä ("kupitin aikaa")
+aloitettu käyttämään aiemmin käyttämätöntä rinnakkaista laskentakapasiteettia levyjen vaihtojen
+välissä, koska crop-korjaus ei tarvitse fyysistä levyä.
