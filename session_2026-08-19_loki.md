@@ -75,6 +75,34 @@ tavallinen puuttuva enkoodaus, turvallista jatkaa normaalilla jonolla):
 | Futurama - Bender's Big Score | ? (ei vielä tarkistettu) | |
 | District 9 | KYLLÄ (osittain, ks. aiempi muisti pysyvästä menetyksestä) | tekstitys pitää korjata |
 
+## Crop-häiriön laajuus koko kirjastolle (mitattu, ei arvattu)
+
+Skannattu kaikki 612 pää-titteliä (`scan_crop_artifact.py`, sama pikselikirkkausmenetelmä kuin
+skriptikorjauksessa). **7 tiedostoa löytyi**, ei koko kirjastoa koskeva ongelma:
+
+- The Wire S01E01, S01E11 (EI koko kausi — vain nämä kaksi jaksoa 23:sta tarkistetusta)
+- 2046 - Part 04
+- Eräs rakkaus tarina - Part 06
+- STAR TREK The Wrath of Khan - Part 02
+- George Clinton/Parliament/Funkadelic - The Mothership Connection (konserttielokuva)
+- Led Zeppelin - Immigrant Song 1972 - Part 02
+
+Huomio: kaksi musiikkielokuvaa mukana — järkeenkäypää, koska konserttitallenteet ovat usein
+analogisista (VHS/Betamax-lähtöisistä) masterista, samantyyppinen VBI-jäänne todennäköinen.
+
+**Ei vielä korjattu** — vaatii kohdistetun crop+re-enkoodauksen jo olemassa olevasta MKV:stä
+(ei levyn uudelleenrippausta) näille 7 tiedostolle. Ei tehty automaattisesti, koska käyttäjä
+halusi nähdä laajuuden ensin.
+
+## Operatiivinen huomio: rinnakkaiset enkoodaukset lämmittävät yhdessä
+
+Pythonia-tuotantoenkoodaus ajettiin suoraan (ei `rip-dvd.sh`:n flock-mekanismin kautta), jolloin
+se pyöri samanaikaisesti Broken Flowers -session kanssa. Ei ylikuumenemisvaaraa (54-58°C, raja
+80-100°C), mutta Broken Flowers -sessio jäi odottamaan skriptin oman (varovaisen) <50°C-kynnyksen
+täyttymistä eikä edennyt niin kauan kuin molemmat pyörivät yhtä aikaa. **Opetus:** älä aja
+manuaalisia HandBrakeCLI-komentoja ohi flock-mekanismin kun toinenkin sessio on jonossa —
+käytä `--encode-only`-jonoa myös kertaluontoisille korjauksille jos mahdollista.
+
 ## Seuraavat askeleet (turvallisia, ei-tuhoavia — voi jatkaa ilman käyttäjää)
 
 1. Käynnistä normaali `--encode-only`-jono niille sessioille joissa on kokonaan puuttuvia elokuvia
