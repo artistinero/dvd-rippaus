@@ -388,14 +388,70 @@ wait_for_terastation() {
 # havaittavasti oikeaa kuvasisältöä levyillä joilla tätä häiriötä ei ole.
 readonly MIN_TOP_CROP_PX=6
 
+# TÄRKEÄ KORJAUS 2026-08-19: alkuperäinen versio pakotti MIN_TOP_CROP_PX:n
+# SOKEASTI kaikille levyille joiden automaattitunnistus antoi vähemmän —
+# tämä olisi leikannut oikeaa kuvasisältöä pois levyiltä joilla ei ole
+# mitään häiriötä ja joilla kuva aidosti ulottuu ylimpään riviin asti
+# (esim. reunaton 4:3-lähde). Käyttäjä huomautti tästä aiheellisesti.
+# Nyt EI pakoteta mitään ilman mittausta — ks. _detect_top_artifact()
+# alla, joka oikeasti tarkistaa pikselikirkkauden ennen päätöstä.
+
+# Ottaa yhden esikatselukehyksen annetusta otsikosta ja mittaa onko sen
+# ylimmissä MIN_TOP_CROP_PX riveissä poikkeavaa kirkkautta verrattuna niitä
+# heti seuraaviin riveihin (sama menetelmä jolla häiriö alunperin todistettiin
+# The Wire S01E01:stä käsin: rivit 0-2 keskikirkkaus ~26, normaali kuva ~12
+# eli suhde >2×). Palauttaa "1" vain jos ero on selvä (>1.5×) — muuten "0",
+# jolloin automaattitunnistuksen arvoa EI muuteta.
+_detect_top_artifact() {
+    local input="$1" title_num="$2"
+    local title_arg=()
+    [[ -n "$title_num" ]] && title_arg=(--title "$title_num")
+    local tmpframe; tmpframe=$(mktemp --tmpdir "rip-dvd-cropcheck-XXXXXX.mkv")
+    HandBrakeCLI --input "$input" "${title_arg[@]}" --no-dvdnav \
+        --start-at duration:5 --stop-at duration:1 \
+        --encoder x264 --encoder-preset ultrafast --quality 40 \
+        --crop-mode none \
+        --output "$tmpframe" </dev/null >/dev/null 2>&1
+    if [[ ! -s "$tmpframe" ]]; then
+        rm -f "$tmpframe"
+        echo 0
+        return
+    fi
+    local result
+    result=$(python3 -c "
+import subprocess, sys
+MIN_TOP = $MIN_TOP_CROP_PX
+wh = subprocess.run(['ffprobe','-v','error','-select_streams','v:0',
+    '-show_entries','stream=width,height','-of','csv=p=0','$tmpframe'],
+    capture_output=True, text=True).stdout.strip()
+try:
+    w, h = map(int, wh.split(','))
+except Exception:
+    print(0); sys.exit()
+raw = subprocess.run(['ffmpeg','-v','error','-i','$tmpframe','-vframes','1',
+    '-pix_fmt','rgb24','-f','rawvideo','-'], capture_output=True).stdout
+need_rows = MIN_TOP + 15
+if len(raw) < w*need_rows*3:
+    print(0); sys.exit()
+def row_avg(y):
+    row = raw[y*w*3:(y+1)*w*3]
+    return sum(row)/len(row) if row else 0
+top_avg = sum(row_avg(y) for y in range(0, MIN_TOP)) / MIN_TOP
+below_avg = sum(row_avg(y) for y in range(MIN_TOP, MIN_TOP+15)) / 15
+print(1 if (below_avg > 2 and top_avg > below_avg * 1.5) else 0)
+" 2>/dev/null)
+    rm -f "$tmpframe"
+    [[ "$result" == "1" ]] && echo 1 || echo 0
+}
+
 # Selvittää HandBraken automaattisesti laskeman rajausarvon skannaamalla
-# annetun otsikon, ja palauttaa liput ("--crop-mode custom --crop T:B:L:R")
-# joissa yläraja on nostettu vähintään MIN_TOP_CROP_PX:ään — muut reunat
-# (ala, vasen, oikea) jäävät täysin automaattitunnistuksen varaan, koska ne
-# vaihtelevat oikeutetusti levyn kuvasuhteen mukaan eikä niissä ole havaittu
-# vastaavaa häiriötä. Jos skannaus epäonnistuu (esim. vioittunut levy),
-# palataan turvallisesti tavalliseen automaattitilaan sen sijaan että koko
-# rippaus kaatuisi tähän.
+# annetun otsikon, ja nostaa yläraajan MIN_TOP_CROP_PX:ään VAIN jos
+# _detect_top_artifact() oikeasti mittaa häiriön olevan läsnä — ei koskaan
+# sokeasti. Muut reunat (ala, vasen, oikea) jäävät aina täysin
+# automaattitunnistuksen varaan, koska ne vaihtelevat oikeutetusti levyn
+# kuvasuhteen mukaan eikä niissä ole havaittu vastaavaa häiriötä. Jos
+# skannaus epäonnistuu (esim. vioittunut levy), palataan turvallisesti
+# tavalliseen automaattitilaan sen sijaan että koko rippaus kaatuisi tähän.
 _get_crop_args() {
     local input="$1" title_num="$2"
     local title_arg=()
@@ -413,7 +469,11 @@ _get_crop_args() {
     local bottom="${vals%%/*}"; vals="${vals#*/}"
     local left="${vals%%/*}"; vals="${vals#*/}"
     local right="$vals"
-    (( top < MIN_TOP_CROP_PX )) && top=$MIN_TOP_CROP_PX
+    if (( top < MIN_TOP_CROP_PX )); then
+        if [[ "$(_detect_top_artifact "$input" "$title_num")" == "1" ]]; then
+            top=$MIN_TOP_CROP_PX
+        fi
+    fi
     echo "--crop-mode custom --crop ${top}:${bottom}:${left}:${right}"
 }
 
@@ -1069,7 +1129,7 @@ encode_session() {
             # Ilman sitä Jellyfin tulkitsee numeron jaksonumeroksi ja joko peittää
             # oikean jakson tai näyttää sen tuplana väärällä nimellä.
             series) out_name="${name} S$(printf '%02d' "$season") Extra $(printf '%02d' "$extra_num")-extra.mkv" ;;
-            *)      out_name="${name} - Extra $(printf '%02d' "$extra_num").mkv" ;;
+            *)      out_name="${name} - Extra $(printf '%02d' "$extra_num")-extra.mkv" ;;
             esac
             printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
                 "$dvd_dir" "$out_name" "$dest" "$t" "${raw_dir##*/}" "$disc_seq" >> "$queue"

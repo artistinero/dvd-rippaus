@@ -15,10 +15,21 @@
 
 2. **Yläreunan kuvahäiriö (The Wire ym.) korjattu skriptiin, EI vielä olemassa oleviin tiedostoihin.**
    Mitattu pikseliarvoista: rivit 0-3 häiriöisiä, HandBraken `--crop-mode auto` ei tunnista niitä koska
-   eivät ole tarpeeksi tummia. Committi `99ef8a0`: pakotettu min. 6px yläraja. **Koskee vain TULEVIA
-   rippauksia.** Olemassa olevien tiedostojen korjaus ei vaadi levyn uudelleenrippausta (vain crop+
-   re-enkoodaus jo olemassa olevasta MKV:stä) — laajuutta ei ole vielä mitattu, käyttäjä nimenomaisesti
-   kielsi soveltamasta korjausta jaksoihin joissa häiriötä ei oikeasti ole (per-jakso mittaus vaaditaan).
+   eivät ole tarpeeksi tummia. **Koskee vain TULEVIA rippauksia.** Olemassa olevien tiedostojen korjaus
+   ei vaadi levyn uudelleenrippausta (vain crop+re-enkoodaus jo olemassa olevasta MKV:stä) — laajuutta
+   ei ole vielä mitattu.
+   - **Ensimmäinen versio (committi `99ef8a0`) oli VIRHEELLINEN:** pakotti min. 6px ylärajauksen
+     SOKEASTI kaikille levyille joiden automaattitunnistus antoi vähemmän, tarkistamatta oliko
+     häiriötä oikeasti olemassa. Tämä olisi leikannut oikeaa kuvasisältöä levyiltä joilla ei ole
+     mitään vikaa. Käyttäjä huomautti tästä aiheellisesti ja välittömästi kun näki sen käytössä
+     livenä (Broken Flowers -enkoodauksessa).
+   - **Korjattu (committi seuraava tämän lokin jälkeen):** lisätty `_detect_top_artifact()` joka
+     ottaa esikatselukehyksen ja MITTAA pikselikirkkauden ennen minkään pakottamista — vain jos
+     ylärivit ovat oikeasti >1,5× kirkkaampia kuin niitä seuraavat rivit, rajaus nostetaan.
+     Testattu: Broken Flowers palauttaa nyt `top=2` (alkuperäinen automaattiarvo, ei enää pakotettu
+     6:een) — mittaus totesi ettei häiriötä ole. **Ei pystytty testaamaan positiivista tapausta**
+     (Wire-raakalähde ei enää tallessa) — kynnysarvot perustuvat Wireltä käsin mitattuihin lukuihin,
+     mutta täyttä kiertotestiä ei ole tehty.
 
 3. **Elokuvien ekstra-nimeäminen ollut rikki alusta asti** (ei regressio — vahvistettu `git log`/`git show`
    committista `eb0b5c9`). Sarjat saivat `-extra`-Jellyfin-tunnisteen, elokuvat eivät koskaan. Korjattu
