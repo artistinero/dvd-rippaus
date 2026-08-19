@@ -288,3 +288,22 @@ tai pidempi sinnikkyys/ddrescue-tyylinen lähestyminen.**
 
 Irrotus 601s, remux 41s. 10 raitaa, kesto täsmäsi täydellisesti. Titlet 4/5 (Part02/03) eivät
 tarvinneet korjausta koska levyllä ei ole niille tekstitystä lainkaan.
+
+## The Wire S01E01 — crop-korjaus VALMIS ja vahvistettu
+
+x265-tuotantoenkoodaus valmistui, 17 raitaa, kesto täsmää (3729,92s). Pikselimittaus jälkikäteen
+vahvisti häiriön poistuneen (rivi 0: 25-26 → 14,3, lähellä normaalia ~11-12). Korvattu kirjastossa.
+Loput 6 crop-häiriöistä tiedostoa (Wire S01E11, 2046 Part04, Eräs rakkaus tarina Part06,
+Star Trek Wrath of Khan Part02, 2 musiikkielokuvaa) EIVÄT ole vielä korjattu.
+
+## Illan päätös (00:15) — käyttäjä nukkumaan
+
+Uusi levy (Apocalypse Now Redux, 2017) rippautuu nyt oikein `rip-dvd.sh`:n omalla dvdbackup-
+putkella, taustalla tmux-sessiossa `dvd-rip`. Käyttäjä antoi loppuohjeet: opettele skriptin
+todellinen toiminta koodista (ei arvauksella), tee kunnollisia muistiinpanoja, tee mitä pyydetään.
+Tallennettu pysyvään muistiin (`feedback_disc_swap_protocol.md`, kohdat 8-9).
+
+**Tilanne juuri nyt kirjautumishetkellä:**
+- Apocalypse Now Redux: dvdbackup käynnissä (~1,7G/7G, ~3min kulunut)
+- Wire S01E01: crop-korjaus valmis ja vahvistettu
+- Kaikki muu tänä iltana tehty työ: ks. yllä olevat osiot kronologisessa järjestyksessä
