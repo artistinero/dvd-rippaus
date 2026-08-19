@@ -112,6 +112,15 @@ säilytetty varmuuskopiona: `/home/keitsi/dvd-rip-tmp/_vanhat_ennen_tekstityskor
 Testikansiot (`_TESTI Elämä on Pythonia ...`) poistettu terastationilta. Jellyfin päivitetty.
 `subtitle_tracker.csv` päivitetty: RIKKI → KUNNOSSA.
 
+## Pieni, ei-blokkaava sivuvirhe havaittu (ei vielä diagnosoitu)
+
+Broken Flowers -session lokissa näkyi `sed: -e expression #1, char 4: unterminated 's' command`
+kun "Broken Flowers - Extra 01-extra.mkv" epäonnistui (rc=2, tunnettu lukuvirhe tällä levyllä).
+Ei estänyt etenemistä seuraavaan raitaan. Nopea `grep 'sed '` rip-dvd.sh:stä ei paljastanut
+ilmeistä syytä (mikään löytyneistä sed-kutsuista ei käytä muuttuvaa tiedostonimeä suoraan
+sed-lausekkeena). Vaatii tarkemman tutkinnan — mahdollisesti liittyy uuteen `-extra`-päätteeseen
+jos jokin koodinpätkä käsittelee tiedostonimeä sed:llä jota en löytänyt.
+
 ## Seuraavat askeleet (turvallisia, ei-tuhoavia — voi jatkaa ilman käyttäjää)
 
 1. Käynnistä normaali `--encode-only`-jono niille sessioille joissa on kokonaan puuttuvia elokuvia
