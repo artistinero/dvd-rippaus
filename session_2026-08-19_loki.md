@@ -1,0 +1,74 @@
+# Työloki 2026-08-19
+
+## Vahvistetut, todistetut löydökset
+
+1. **Tekstitysbugin juurisyy löydetty ja KORJATTU.** brainbinillä oli HandBrakeCLI 1.7.2 (apt:n ainoa
+   tarjolla ollut versio). HandBraken oma GitHub-keskustelu #6740 vahvistaa tunnetun VobSub-bugin
+   (ensimmäinen tekstitysrivi putoaa, loput näkyvät edellisen rivin ajastuksessa), korjattu versiossa
+   1.9.2. `--no-dvdnav`-teoria (2026-08-18) todistettu vääräksi käyttäjän omalla testillä.
+   - HandBrake käännetty lähdekoodista (`/home/keitsi/HandBrake-src/build/HandBrakeCLI`,
+     versio `20260816074532-d43e68f-master`, reilusti yli 1.9.2:n).
+   - **Asennettu tuotantoon:** `/usr/local/bin/HandBrakeCLI` (PATH-etusija apt:n `/usr/bin/HandBrakeCLI`:n
+     edellä, apt-pakettia ei koskettu).
+   - **Empiirisesti vahvistettu korjatuksi:** käyttäjä katsoi VNC-playerillä Elämä on Pythonia
+     -uudelleenenkoodauksen (`/dev/sr1` suoraan, molemmat suomiraidat) — tekstitys menee kohdilleen.
+
+2. **Yläreunan kuvahäiriö (The Wire ym.) korjattu skriptiin, EI vielä olemassa oleviin tiedostoihin.**
+   Mitattu pikseliarvoista: rivit 0-3 häiriöisiä, HandBraken `--crop-mode auto` ei tunnista niitä koska
+   eivät ole tarpeeksi tummia. Committi `99ef8a0`: pakotettu min. 6px yläraja. **Koskee vain TULEVIA
+   rippauksia.** Olemassa olevien tiedostojen korjaus ei vaadi levyn uudelleenrippausta (vain crop+
+   re-enkoodaus jo olemassa olevasta MKV:stä) — laajuutta ei ole vielä mitattu, käyttäjä nimenomaisesti
+   kielsi soveltamasta korjausta jaksoihin joissa häiriötä ei oikeasti ole (per-jakso mittaus vaaditaan).
+
+3. **Elokuvien ekstra-nimeäminen ollut rikki alusta asti** (ei regressio — vahvistettu `git log`/`git show`
+   committista `eb0b5c9`). Sarjat saivat `-extra`-Jellyfin-tunnisteen, elokuvat eivät koskaan. Korjattu
+   skriptiin (sama committi `99ef8a0`) + nimetty uudelleen 35 olemassa olevaa tiedostoa.
+
+## KESKENERÄINEN / EPÄVARMA — vaatii tarkistuksen ennen jatkoa
+
+4. **"2012"-levyllä löytyi ~80 roska-/duplikaattitiedostoa** (aikaleimat 07:53-07:55 UTC 2026-08-19).
+   Juurisyy: jonon-uudelleenrakennuslogiikka (rivi ~1062) laskee "jo valmiit ekstrat" pelkästä
+   tiedostonimien lukumäärästä, ei validoi sisältöä. **MIKÄ TÄSMÄLLEEN KÄYNNISTI TÄMÄN EI OLE
+   SELVITETTY** — cron/systemd/at/watchdog.sh/dvd-encode-recovery.sh/tmux-serverit kaikki tarkistettu
+   ja suljettu pois. Jää auki.
+
+5. **Koko kirjaston audit löysi saman duplikaatiobugin 6 muusta kansiosta.** 34 tiedostoa poistettu
+   kestovertailun perusteella (pienin numero säilytetty per kestoryhmä).
+   - **Futurama S04: VAHVA todiste** (8 uniikkia kestoa, kukin toistui 3-5x systemaattisesti samassa
+     suhteellisessa numerojärjestyksessä joka kierroksella — rakenteellinen todiste, ei vain kesto).
+   - **Cube, Caveman's Valentine, E.T. (yksittäiset parit/kolmikot): HEIKOMPI todiste** — vain kesto
+     täsmäsi, ei tiedostokokoa/muuta vahvistusta tarkistettu ennen poistoa. **Käyttäjä varoitti
+     aiheellisesti liiallisesta varmuudesta.** Näitä poistoja EI VOI enää todentaa jälkikäteen koska
+     tiedostot on jo poistettu.
+     - **Palautusmahdollisuus:** E.T.:lle raakalähde on vielä koneella (voi tarkistaa/palauttaa).
+       Cube:lle, Caveman's Valentinelle, Futurama S02/S03:lle EI ole raakalähdettä — palautus
+       vaatisi fyysisen levyn uudelleen.
+   - **PÄÄTÖS: ei enää poistoja pelkän kestovertailun perusteella.** Jos vastaava tilanne toistuu,
+     vaaditaan lisäksi tiedostokoko+bittinopeusvertailu ennen poistoa, tai käyttäjän oma vahvistus.
+
+## Tallessa olevat raakalähteet (dvdbackup, ei vaadi levyä takaisin asemaan)
+
+11 kpl, joista osa EI OLE VIELÄ KOSKAAN ENKOODATTU KIRJASTOON (ei tekstitysbugin korjaus vaan
+tavallinen puuttuva enkoodaus, turvallista jatkaa normaalilla jonolla):
+
+| Teos | Kirjastossa jo? | Huomio |
+|---|---|---|
+| The Blues Brothers | EI | puuttuu kokonaan, jono kesken |
+| Blues Brothers 2000 | EI | puuttuu kokonaan |
+| Broken Flowers | EI | puuttuu, 2 eri dvdbackup-kopiota (disc-001 ja disc-005 — syytä ei selvitetty) |
+| E.T. the Extra-Terrestrial | KYLLÄ (pääelokuva + osa ekstroista) | tekstitys pitää korjata olemassa olevaan |
+| Dante 01 | KYLLÄ | tekstitys pitää korjata olemassa olevaan |
+| 2012 | OSITTAIN (vain ekstrat, pääelokuva puuttuu/rikki) | ks. kohta 4 |
+| Burn After Reading | KYLLÄ (12/14 osaa, Part 10/11 pysyvästi menetetty) | tekstitys pitää korjata |
+| Futurama S04 (disc-003) | KYLLÄ | tekstitys pitää korjata |
+| Futurama - Bender's Big Score | ? (ei vielä tarkistettu) | |
+| District 9 | KYLLÄ (osittain, ks. aiempi muisti pysyvästä menetyksestä) | tekstitys pitää korjata |
+
+## Seuraavat askeleet (turvallisia, ei-tuhoavia — voi jatkaa ilman käyttäjää)
+
+1. Käynnistä normaali `--encode-only`-jono niille sessioille joissa on kokonaan puuttuvia elokuvia
+   (Blues Brothers, Blues Brothers 2000, Broken Flowers) — puhdas lisäys, ei kosketa mitään olemassa
+   olevaa.
+2. Mittaa yläreunan crop-häiriön laajuus per-jakso koko kirjastolle (lukeva, ei muuta mitään).
+3. Tekstityskorjaukset (irrotus+remux) niille joilla on jo video/ääni kirjastossa — TEHDÄÄN VASTA
+   kun käyttäjä voi tarkistaa tuloksen, ei blind-mass-fix.
