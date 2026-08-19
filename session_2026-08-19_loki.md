@@ -150,6 +150,63 @@ aakkosjärjestys, kaikki kuluneet ajat lokiin.
 **Sääntö tästä eteenpäin:** jokaiselle levylle kirjataan `date +%s` ennen ja jälkeen sekä
 irrotuksen että remuxin, jotta kokonaisaika on tarkka.
 
+## Menetelmäanalyysi: miksi HandBrake-yhden-ajon-menetelmä voitti (perusteltu, ei vain lopputulos)
+
+**Kolme menetelmää kokeiltu, tässä miksi kaksi hylättiin ja yksi jäi:**
+
+1. **HandBrake, kaikki tekstitysraidat yhdessä ajossa** (`--subtitle 1,2,3...N --encoder x264
+   --encoder-preset ultrafast`). Video dekoodataan ja enkoodataan kerran, mutta KAIKKI pyydetyt
+   tekstitysraidat poimitaan SAMALLA läpikäynnillä koska ne kulkevat samassa MPEG-ohjelmavirrassa
+   videon kanssa — HandBrake demuksii ne "ilmaiseksi" saman lukukerran aikana.
+   **Mitattu kesto riippuu elokuvan PITUUDESTA, ei raitamäärästä:**
+   - 101 Reykjavik: 84min, 2 raitaa → 310s
+   - 2001 Avaruusseikkailu Part01: 142min, 10 raitaa → 789s
+   - 2010: 111min, 21 raitaa → 523s
+   Näistä näkyy: 2010 (111min) on nopeampi kuin 2001 (142min) VAIKKA siinä on 2× enemmän raitoja
+   — pituus selittää keston, ei raitamäärä. Tämä on looginen seuraus siitä että video on ainoa
+   asia jota oikeasti pitää DEKOODATA/ENKOODATA; tekstitysraidat ovat vain rinnakkaisia,
+   kevyitä datavirtoja samassa tiedostossa.
+
+2. **mencoder, yksi ajo per kieli** (`-ovc copy -sid N -vobsuboutindex N`, toistettu N kertaa).
+   Idea oli hyvä teoriassa (`-ovc copy` = ei uudelleenenkoodausta = pitäisi olla nopea), mutta
+   käytännössä KATASTROFAALINEN moniraitaisille levyille: jokainen ajo lukee koko elokuvan
+   ALUSTA LOPPUUN uudelleen VAIN yhtä kieltä varten. 2010:llä (111min, 21 kieltä) tämä olisi
+   tarkoittanut 21 × ~11min ≈ 4 tuntia — 27× hitaampi kuin HandBraken yhden-ajon-menetelmä
+   samalle levylle (523s). **Miksi tämä ei tullut heti ilmi:** ensimmäinen ajatus oli että
+   `-ovc copy` tekee sen nopeaksi koska ei enkoodaa — mutta unohdin että jokainen ERILLINEN ajo
+   silti lukee/demuksii koko streamin ajallisesti alusta loppuun, riippumatta enkoodauksesta.
+   N kertaa toistettuna N× kustannus, ei amortoidu.
+
+3. **Harkittu mutta EI kokeiltu: dvdbackup-paikalliskopio + mencoder paikallisesta kopiosta.**
+   Ajatus: mencoderin hitaus voisi johtua optisen aseman I/O-nopeudesta (~1-2MB/s) eikä
+   ohjelmiston laskentakustannuksesta — paikallinen levy on 5-10× nopeampi. **Miksi tätä ei
+   silti oteta käyttöön:** koska HandBrake jo hoitaa KAIKKI raidat yhdessä ajossa riippumatta
+   niiden määrästä (kohta 1), ei ole mitään toistokertoja joita amortoida — paikalliskopion
+   9,5min lisäkustannus ei toisi mitään hyötyä, koska HandBrake ei tarvitse montaa erillistä
+   läpikäyntiä ylipäätään. Paikalliskopio olisi hyödyllinen VAIN jos joutuisimme ajamaan monta
+   ERILLISTÄ prosessia saman levyn läpi — emme joudu, koska HandBrake ei ole per-kieli-rajoitettu
+   kuten mencoder.
+
+**Lopullinen sääntö kaikille tuleville levyille:** suora `HandBrakeCLI --input /dev/sr1 --title N
+--subtitle <kaikki pilkulla eroteltuna> --encoder x264 --encoder-preset ultrafast --quality 40
+--audio <kaikki> --aencoder copy` — ei paikalliskopiota, ei mencoderia, riippumatta raitamäärästä.
+
+## KRIITTINEN PROSESSIVIRHE: tekstiskannaus tekstimuodossa katkeaa
+
+`HandBrakeCLI --scan` (ilman `--json`) näyttää tekstimuotoisessa tulosteessa VAIN ENSIMMÄISET
+N tekstitysraitaa (havaittu raja: näytti tasan 10 kun oikea määrä oli 21). Tämä ei ole eri
+levypainos eikä levyvaurio — se on HandBraken OMAN tekstitulosteen katkeaminen, joka paljastui
+vasta kun 2010-levyn kirjaston 21 raitaa ei täsmännyt tekstiskannauksen 10:een.
+
+**Korjattu prosessi:** käytä AINA `HandBrakeCLI --input X --title N --scan --json` (tulostus
+sisältää log-rivejä ENNEN JSON:ia, hae `JSON Title Set: {`-rivi ja parsi siitä eteenpäin) kun
+pitää tietää tarkka tekstitysraitojen (tai minkä tahansa raidan) määrä. Älä koskaan luota
+`grep`-pohjaiseen tekstiskannaukseen raitamäärän laskemiseen.
+
+**Vaikutus jo tehtyyn työhön:** 2001: Avaruusseikkailu Part01 KORJATTIIN tekstiskannauksen (10
+raitaa) perusteella ENNEN kuin tämä bugi löytyi — levy on jo palautettu, ei voida tarkistaa
+jälkikäteen ilman levyn uudelleenasettamista asemaan. **Merkitty uudelleentehtäväksi.**
+
 ## Seuraavaksi
 
 2001: Space Odyssey — käyttäjä ilmoitti sen olevan seuraava levy joka laitetaan asemaan.
