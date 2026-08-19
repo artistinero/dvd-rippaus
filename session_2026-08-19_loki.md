@@ -131,11 +131,24 @@ ilmeistä syytä (mikään löytyneistä sed-kutsuista ei käytä muuttuvaa tied
 sed-lausekkeena). Vaatii tarkemman tutkinnan — mahdollisesti liittyy uuteen `-extra`-päätteeseen
 jos jokin koodinpätkä käsittelee tiedostonimeä sed:llä jota en löytänyt.
 
-## Seuraavat askeleet (turvallisia, ei-tuhoavia — voi jatkaa ilman käyttäjää)
+## Koko kirjaston laajuusmittaus (VobSub-tekstitykset) + suunnitelma (21:35)
 
-1. Käynnistä normaali `--encode-only`-jono niille sessioille joissa on kokonaan puuttuvia elokuvia
-   (Blues Brothers, Blues Brothers 2000, Broken Flowers) — puhdas lisäys, ei kosketa mitään olemassa
-   olevaa.
-2. Mittaa yläreunan crop-häiriön laajuus per-jakso koko kirjastolle (lukeva, ei muuta mitään).
-3. Tekstityskorjaukset (irrotus+remux) niille joilla on jo video/ääni kirjastossa — TEHDÄÄN VASTA
-   kun käyttäjä voi tarkistaa tuloksen, ei blind-mass-fix.
+`mkvmerge -J` koko kirjastolle: **425/706 .mkv-tiedostoa sisältää VobSub-tekstityksen**
+(381 pääteosta/jaksoa, 44 ekstraa). Paljon suurempi laajuus kuin vanhan trackerin 54 kohdetta.
+Koko suunnitelma: `suunnitelma_tekstityskorjaus.md` (committi `2ae23a5`). Käyttäjän vahvistamat
+pelisäännöt tallennettu pysyvään muistiin: `feedback_disc_swap_protocol.md` — kysy aina
+epäselvissä, avaa levykelkka heti valmistuttua, kerro poikkeamat, levy=käsittelyn yksikkö,
+aakkosjärjestys, kaikki kuluneet ajat lokiin.
+
+## Levy-kerrallaan-korjaukset (aikaleimat)
+
+| # | Teos | Irrotus (HandBrake) | Remux (mkvmerge) | Yhteensä | Huomiot |
+|---|---|---|---|---|---|
+| 1 | 99 frangia (2007) | ei tarkkaa aikaa kirjattu (ensimmäinen, opittu tästä eteenpäin kirjata aina) | 33s | ~muutama min | 5 tekstitysraitaa levyllä, 4 käytössä (2xsuomi+2xruotsi), 1 "Unknown"-raita jätetty pois koska ei ollut kirjastossakaan alunperin. Kesto täsmäsi täydellisesti (6004,224s). Levykelkka avattu onnistuneesti heti valmistuttua. |
+
+**Sääntö tästä eteenpäin:** jokaiselle levylle kirjataan `date +%s` ennen ja jälkeen sekä
+irrotuksen että remuxin, jotta kokonaisaika on tarkka.
+
+## Seuraavaksi
+
+101 Reykjavik — käyttäjä ilmoitti sen olevan seuraava levy joka laitetaan asemaan.
