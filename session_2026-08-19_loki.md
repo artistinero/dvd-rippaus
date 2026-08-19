@@ -228,3 +228,9 @@ vastaava historia projektissa) kun siihen palataan. 13 olemassa olevaa ekstraa (
 aiemmin tänään) eivät vielä saaneet tekstityskorjausta — myös nämä odottavat.
 
 ## Seuraavaksi (päivitetty)
+
+## 2046 (2004) — LEVYÄ EI LÖYDY
+
+Käyttäjä ei löydä fyysistä levyä. Jää odottamaan kunnes levy löytyy. Huomio: tämä teos oli myös
+aiemmin tänään mitatussa crop-häiriölistalla ("2046 - Part 04", top=3.8 vs alla=2.2) — kun levy
+joskus löytyy, kannattaa hoitaa sekä tekstityskorjaus että crop-korjaus samalla kertaa.
