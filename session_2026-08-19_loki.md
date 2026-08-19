@@ -103,6 +103,15 @@ täyttymistä eikä edennyt niin kauan kuin molemmat pyörivät yhtä aikaa. **O
 manuaalisia HandBrakeCLI-komentoja ohi flock-mekanismin kun toinenkin sessio on jonossa —
 käytä `--encode-only`-jonoa myös kertaluontoisille korjauksille jos mahdollista.
 
+## Elämä on Pythonia — LOPULLISESTI KORJATTU (13:24)
+
+Uudelleenenkoodattu suoraan `/dev/sr1`:ltä tuotantolaadulla (x265 CRF21, `--all-subtitles`,
+`--all-audio`). Valmis tiedosto (848MB, 6 raitaa: video+ääni+2×suomi+2×ruotsi, kesto 84,68min
+täsmää alkuperäiseen) korvasi vanhan kirjastotiedoston atomisesti. Vanha rikkinäinen versio
+säilytetty varmuuskopiona: `/home/keitsi/dvd-rip-tmp/_vanhat_ennen_tekstityskorjausta/`.
+Testikansiot (`_TESTI Elämä on Pythonia ...`) poistettu terastationilta. Jellyfin päivitetty.
+`subtitle_tracker.csv` päivitetty: RIKKI → KUNNOSSA.
+
 ## Seuraavat askeleet (turvallisia, ei-tuhoavia — voi jatkaa ilman käyttäjää)
 
 1. Käynnistä normaali `--encode-only`-jono niille sessioille joissa on kokonaan puuttuvia elokuvia
