@@ -269,3 +269,22 @@ tarvitse korjausta. Irrotus käynnissä Part01:lle.
 Täysi x265-tuotantoenkoodaus (ei pikainen), ETA ~44-56min. Käyttäjän pyynnöstä ("kupitin aikaa")
 aloitettu käyttämään aiemmin käyttämätöntä rinnakkaista laskentakapasiteettia levyjen vaihtojen
 välissä, koska crop-korjaus ei tarvitse fyysistä levyä.
+
+## American Beauty — SIIRRETTY MYÖHEMMÄKSI, mahdollinen levyvaurio
+
+Skannaus jumiutui toistuvasti täsmälleen samaan kohtaan ("Scanning title 1 of 7, preview 1,
+50.71%") viidellä eri yrityksellä. Poissuljettu systemaattisesti:
+- Ei prosessiristiriita (puhdas yksittäinen yritys jumiutui silti samaan kohtaan)
+- Ei CPU-kilpailu (Wire-crop-tehtävä pysäytettiin kokonaan `kill -STOP`:lla, ei silti auttanut)
+- Ei dmesg-tason I/O-virhettä (tarkistettu, ei osumia)
+
+**Todennäköinen syy:** yksittäinen huono sektori levyllä täsmälleen sillä kohdalla josta HandBrake
+yrittää hakea esikatselukehyksen titteli 1:lle — asema yrittää uudelleen loputtomiin ilman että
+raportoi kovaa virhetttä käyttöjärjestelmälle. Ei tutkittu pidemmälle käyttäjän aikapaineen vuoksi.
+Levykelkka avattu, siirrytty eteenpäin. **Vaatii myöhemmin: mahdollisesti eri asema, puhdistus,
+tai pidempi sinnikkyys/ddrescue-tyylinen lähestyminen.**
+
+## Arthur's Dyke — VALMIS
+
+Irrotus 601s, remux 41s. 10 raitaa, kesto täsmäsi täydellisesti. Titlet 4/5 (Part02/03) eivät
+tarvinneet korjausta koska levyllä ei ole niille tekstitystä lainkaan.
