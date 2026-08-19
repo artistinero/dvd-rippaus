@@ -145,10 +145,11 @@ aakkosjärjestys, kaikki kuluneet ajat lokiin.
 | # | Teos | Irrotus (HandBrake) | Remux (mkvmerge) | Yhteensä | Huomiot |
 |---|---|---|---|---|---|
 | 1 | 99 frangia (2007) | ei tarkkaa aikaa kirjattu (ensimmäinen, opittu tästä eteenpäin kirjata aina) | 33s | ~muutama min | 5 tekstitysraitaa levyllä, 4 käytössä (2xsuomi+2xruotsi), 1 "Unknown"-raita jätetty pois koska ei ollut kirjastossakaan alunperin. Kesto täsmäsi täydellisesti (6004,224s). Levykelkka avattu onnistuneesti heti valmistuttua. |
+| 2 | 101 Reykjavik (2000) | 310s (5min10s) | 13s | 5min23s | 2 suomiraitaa (WS+LB), täsmäsi täydellisesti (5075,808s). Levykelkka avattu heti valmistuttua. |
 
 **Sääntö tästä eteenpäin:** jokaiselle levylle kirjataan `date +%s` ennen ja jälkeen sekä
 irrotuksen että remuxin, jotta kokonaisaika on tarkka.
 
 ## Seuraavaksi
 
-101 Reykjavik — käyttäjä ilmoitti sen olevan seuraava levy joka laitetaan asemaan.
+2001: Space Odyssey — käyttäjä ilmoitti sen olevan seuraava levy joka laitetaan asemaan.
