@@ -212,3 +212,19 @@ jälkikäteen ilman levyn uudelleenasettamista asemaan. **Merkitty uudelleenteht
 2001: Space Odyssey — käyttäjä ilmoitti sen olevan seuraava levy joka laitetaan asemaan.
 | 3 | 2001- Avaruusseikkailu (1968) Part01+02 | 789s (13min9s, HandBrake-menetelmä, viimeinen kerta ennen mencoderiin siirtymistä) | 30s+1s | ~13min40s | 10 tekstitysraitaa Part01:lle (levy: eng,ger,dut,swe,nor,dan,fin,ice,ita,ger — kirjastossa oli aiemmin 11, yksi ylimääräinen "eng" jota ei löytynyt levyltä, korvattu levyn 10:llä). Part02:lle lisättiin ensimmäistä kertaa tekstitys (eng) — ei ollut aiemmin lainkaan. **HandBrake-menetelmä todettu liian hitaaksi (13min per pitkä elokuva) — vaihdettu mencoderiin joka ei kosketa videoon (`-ovc copy`), vahvistettu primäärilähteestä (mplayerhq.hu-peili).** |
 | 4 | 2010- The Year We Make Contact (1984) | 523s (8min43s) | 40s | ~9min | 21 tekstitysraitaa. **TÄRKEÄ HAVAINTO: HandBraken tekstiskannaus tekstimuodossa katkeaa ~10 raitaan!** JSON-skannaus (`--scan --json`) paljasti oikean 21 raidan listan. **2001: Avaruusseikkailu Part01 tehtiin AIEMMIN tekstiskannauksella (näytti 10) — todennäköisesti puuttuu 11. raita, VAATII UUDELLEENTEON.** Kokeiltiin myös mencoder-menetelmää (yksi ajo per kieli) mutta todettiin katastrofaalisen hitaaksi 21 kielelle (~4h) koska käy koko elokuvan läpi erikseen jokaista kieltä kohden — hylätty, palattu HandBrake-yhden-ajon-menetelmään. **Analyysi: HandBraken kesto riippuu elokuvan PITUUDESTA ei raitamäärästä (yksi pass kaikille), joten se on jo optimaalinen kaikille tapauksille — ei tarvita paikalliskopio+mencoder-kiertotietä millekään levylle.** |
+
+## 2012 — SIIRRETTY MYÖHEMMÄKSI, aito levyvaurio
+
+Pääelokuva puuttuu kirjastosta kokonaan (aiemmin poistettu rikkinäisenä, ks. "2012"-osio
+yllä). Yritettiin täysi tuotantoenkoodaus levyltä (`/dev/sr1`, titteli 1, 151min, x265 CRF21,
+13 tekstitysraitaa + 4 ääniraitaa vahvistettu JSON-skannauksella) — **epäonnistui heti**:
+vain 12 kehystä (0,57s) enkoodautui, 10KB tiedosto, HandBrake raportoi silti rc=0 ("Encode
+done!"). Sama aito lukuvirhe kuin aiemmin tänään dokumentoitu (READ_ERRORS=159 alkuperäisessä
+rippauksessa 2026-08-17). Väliaikaistiedosto siivottu, levykelkka avattu.
+
+**Käyttäjän päätös: siirretään myöhemmäksi, ei yritetä nyt uudelleen.** Vaatii todennäköisesti
+erikoiskäsittelyä (esim. lukuvirhettä sietävä osissa-uudelleenyritys, ks. Futurama S03 -levyjen
+vastaava historia projektissa) kun siihen palataan. 13 olemassa olevaa ekstraa (jo deduplikoitu
+aiemmin tänään) eivät vielä saaneet tekstityskorjausta — myös nämä odottavat.
+
+## Seuraavaksi (päivitetty)
