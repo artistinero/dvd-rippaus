@@ -351,3 +351,17 @@ JO NYT rikkinäisinä 0,48 sekunnin tiedostoina — sama vanha "rc=0 mutta lähe
 vanhoja tiedostoja ei ole koskaan validoitu uudelleen. Raakalähde on tallessa (READ_ERRORS=298,
 osa levystä silti luettavissa — 8/9 muuta osaa onnistui). **Vaatii oman korjauskierroksensa,
 ei tehty nyt koska aiheeltaan eri kuin tekstityskorjaus.**
+
+## Futurama S04 E15-E18 tekstityskorjaus VALMIS
+
+Kaikki 4 jaksoa korjattu (6 tekstitysraitaa/jakso: dan,eng,fin,nor,swe,eng). E15/E16 täsmäsivät
+kestoltaan täydellisesti heti. E17/E18 näyttivät ~1s eron mkvmerge-raportoidussa kestossa —
+tarkistettu tarkkuudella (ffprobe -count_frames, koko videon dekoodaus): kehysmäärät täsmäsivät
+TÄSMÄLLEEN (32510=32510, 32470=32470), pieni kestoero oli vain metadataa, ei todellista
+sisältöeroa. Sama ilmiö kuin Amarcordilla aiemmin (pieni %-luokan kestoero, ei oikea ongelma).
+
+**Opittu virhe matkalla:** Burn After Reading Part09:n remuxissa käytin ensin väärää
+track-numerointia (-s 2,3 piti olla -s 1,2), joka olisi tuottanut täysin ilman tekstitystä
+olevan tiedoston — huomattiin verifioinnissa ennen kirjastoon kirjoittamista, korjattiin.
+Tästä eteenpäin: TARKISTA AINA track ID:t mkvmerge -J:llä newsub-tiedostosta ennen remux-
+komennon kirjoittamista, älä oleta numerointia.
