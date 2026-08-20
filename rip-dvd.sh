@@ -677,20 +677,20 @@ _session_has_pending_work() {
             (( _unresolved == 0 )) && return 1
         fi
 
-        local _ok_n; _ok_n=$(grep '^OK=' "$_rep" 2>/dev/null | cut -d= -f2)
-        if [[ -n "$_ok_n" ]]; then
-            local _total_titles=0 _dmf
-            for _dmf in "${_sdir}"disc-*/meta.conf; do
-                [[ -f "$_dmf" ]] || continue
-                local _tc; _tc=$(grep '^TITLE_COUNT=' "$_dmf" 2>/dev/null | cut -d= -f2)
-                [[ "$_tc" =~ ^[0-9]+$ ]] && (( _total_titles += _tc ))
-            done
-            local _skip_n=0
-            [[ -f "${_sdir}.skip-titles" ]] && _skip_n=$(grep -c . "${_sdir}.skip-titles" 2>/dev/null || echo 0)
-            if (( _total_titles > 0 )) && (( _ok_n + _skip_n >= _total_titles )); then
-                return 1
-            fi
-        fi
+        # HUOM 2026-08-20: harkittiin lisäystä joka vertaisi raportin OK-lukua
+        # session-dirin TITLE_COUNT-summaan, mutta PERUTTU heti kun havaittiin
+        # vaarallisempi tapaus kuin alkuperäinen ongelma: kun session käsitellään
+        # USEANA ERILLISENÄ --encode-only-ajona levy kerrallaan (tavallista ison
+        # session pilkkoutuessa d001/d002/d003/d004-tmux-sessioihin), JAETTU
+        # .encode-report YLIKIRJOITTUU jokaisen erillisen ajon lopussa eikä
+        # koskaan kerro KOKO session-dirin kumulatiivista totuutta. Havaittu
+        # käytännössä: raportti näytti OK=2 (vain levyt 1-2 valmiit klo 04:50)
+        # vaikka levy 3 (Gandhi) oli sillä hetkellä AKTIIVISESTI kesken ja levy 4
+        # ei ollut edes alkanut — OK+skip-vertailu olisi silti voinut väittää
+        # session valmiiksi jos levyjen TITLE_COUNT-summa olisi sattunut
+        # täsmäämään. Väärä "kaikki valmis" on paljon vaarallisempi kuin väärä
+        # "vielä jonossa" (voisi johtaa siihen että joku siivoaa raakalähteitä
+        # luullen työn valmiiksi vaikka enkoodaus on yhä kesken). EI TOTEUTETTU.
     fi
     return 0
 }
@@ -1794,7 +1794,11 @@ main() {
         [[ -d "$enc_dir" ]]  || die "Hakemisto ei löydy: $enc_dir"
         ensure_terastation || die "Terastation ei saatu mountattua"
         command -v HandBrakeCLI &>/dev/null || die "HandBrakeCLI ei löydy"
-        log "═══ Enkoodaus-only: ${enc_dir##*/} ═══"
+        # Korjattu 2026-08-20: ${enc_dir##*/} tuotti tyhjän nimen kun enc_dir
+        # päättyi kauttaviivaan (esim. main()in automaattikäynnistys antaa
+        # aina "session_XXX/"-muotoisen polun). basename+%/ poistaa loppu-
+        # kauttaviivan ennen pilkkomista, joten nimi näkyy aina oikein.
+        log "═══ Enkoodaus-only: $(basename "${enc_dir%/}") ═══"
         encode_session "$enc_dir"
         log "═══ Kaikki valmis! ═══"
         return
