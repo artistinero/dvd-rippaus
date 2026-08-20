@@ -334,3 +334,20 @@ per-titteli-menetelmä (oikea PGC-rajojen käsittely), nopea koska osat lyhyitä
 Part 06:lla ei ole ääntä eikä tekstitystä lainkaan — ei korjausta tarvittu. Kaikki kolme korjattua
 osaa vahvistettu (4 raitaa, kesto täsmää). District 9 -teoksen tekstityskorjaus on nyt VALMIS
 kaikkien vielä olemassa olevien osien osalta.
+
+## Burn After Reading tekstityskorjaus VALMIS + uusi löydös
+
+Korjattu 6/9 olemassa olevaa osaa (01,02,04,05,06,09) HandBraken per-titteli-menetelmällä.
+Part 07/08:lla ei ole tekstitystä levylläkään (vahvistettu JSON-skannauksella), ei tarvinnut
+korjata. **Virhe tehtiin ja korjattiin matkalla:** Part09:lle (2 tekstitysraitaa: fin+swe)
+käytin ensin väärää `-s 2,3` remux-komentoa (piti olla `-s 1,2`, koska newsub-tiedostossa
+raidat olivat ID 1-2 ei 2-3) — tulos olisi ollut TÄYSIN ilman tekstitystä. Huomattiin
+verifioinnissa ENNEN kirjastoon kirjoittamista (raitamäärä oli 1 eikä 3), korjattiin
+uudelleenajolla ja oikeilla track-numeroilla, vahvistettu oikeaksi ennen korvausta.
+
+**UUSI LÖYDÖS, EI KORJATTU (eri ongelma kuin tekstitys):** Part 03, 12, 13, 14 ovat kirjastossa
+JO NYT rikkinäisinä 0,48 sekunnin tiedostoina — sama vanha "rc=0 mutta lähes tyhjä tuotos"
+-bugi jonka validointi (>1MB-tarkistus) on sittemmin korjattu skriptiin, mutta näitä
+vanhoja tiedostoja ei ole koskaan validoitu uudelleen. Raakalähde on tallessa (READ_ERRORS=298,
+osa levystä silti luettavissa — 8/9 muuta osaa onnistui). **Vaatii oman korjauskierroksensa,
+ei tehty nyt koska aiheeltaan eri kuin tekstityskorjaus.**
