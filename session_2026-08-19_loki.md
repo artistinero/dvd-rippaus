@@ -307,3 +307,20 @@ Tallennettu pysyvään muistiin (`feedback_disc_swap_protocol.md`, kohdat 8-9).
 - Apocalypse Now Redux: dvdbackup käynnissä (~1,7G/7G, ~3min kulunut)
 - Wire S01E01: crop-korjaus valmis ja vahvistettu
 - Kaikki muu tänä iltana tehty työ: ks. yllä olevat osiot kronologisessa järjestyksessä
+
+## 2026-08-20 aamu: tunnetut rikkinäiset raidat poistettu jonosta pysyvästi
+
+Käyttäjän pyynnöstä ennen uuden rip-dvd.sh-session käynnistämistä. Käytetty skriptin oma
+`--skip`-mekanismi (ei poistettu mitään dataa, vain merkitty pysyvästi ohitetuksi):
+
+- Futurama S04 Extra 41-extra.mkv (jo aiemmin skipattu)
+- Burn After Reading Part 10/11 (jo aiemmin skipattu)
+- 2012.mkv + Extra 80/82/83/84 (uusi skippaus)
+- Lapinlahden Linnut 25 V S01E03.mkv (samalla sessiolla, ei aiemmin huomattu — sama
+  korruptoitunut-lähde-virhe)
+- Broken Flowers Extra 01, Blues Brothers Extra 02, Blues Brothers 2000 Extra 02/03/04
+- Goodbye Lenin! Extra 02 (eiliseltä rippaukselta)
+
+Vahvistettu `_session_has_pending_work()`-funktiolla suoraan (ei arvattu): kaikki 5 sessiota
+eivät enää näy jonossa. Jäljelle jäi 2 aidosti tervettä pending-sessiota (District 9,
+E.T./Dante 01 -sessio) joita EI kosketettu.
