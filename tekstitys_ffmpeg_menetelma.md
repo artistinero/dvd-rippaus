@@ -1,4 +1,35 @@
-# Nopea tekstitysirrotus ffmpegillä — tutkittu ja testattu 2026-08-20 yöllä
+# Nopea tekstitysirrotus ffmpegillä — TESTATTU JA VAHVISTETTU TOIMIVAKSI 2026-08-20 yöllä
+
+**PÄIVITYS: koko proseduuri on nyt automatisoitu ja testattu päästä päähän onnistuneesti.**
+Skripti: `extract_subs_fast.py` (repon juuressa + `/usr/local/bin/extract_subs_fast.py`
+brainbinillä). Testattu "2012"-datalla: 13/13 raitaa oikein, kielitunnisteet vahvistettu
+oikeiksi (`mkvmerge -J`), suomenkielisen raidan sisältö tarkistettu erikseen
+(`mkvextract`+`.idx`-tiedosto): 1661 aitoa tekstitysriviä, oikea `id: fi`-merkintä, ei tyhjää
+tai roskadataa. Kokonaisaika 13 raidalle 155min elokuvasta: ~25s (vs. HandBraken n. 500-800s
+samankokoiselle elokuvalle — 20-30× nopeampi, todistettu käytännössä ei vain laskettu).
+
+## Käyttö
+
+```bash
+python3 /usr/local/bin/extract_subs_fast.py <VIDEO_TS-kansio> <VTS-numero> <ulostulo.mkv> <kieli1,kieli2,...>
+# esim:
+python3 /usr/local/bin/extract_subs_fast.py \
+    /home/keitsi/dvd-rip-tmp/.../dvdbackup/2012/VIDEO_TS 1 /tmp/2012_subs.mkv \
+    eng,fra,nld,ara,dan,fin,hin,nor,swe,eng,eng,fra,nld
+```
+
+Kielilista saadaan HandBraken JSON-skannauksesta (`HandBrakeCLI --scan --json`, ks. muisti
+tekstiskannauksen katkeamisbugista — JSON, ei tekstimuoto). VTS-numero pitää päätellä
+täsmäyttämällä VTS:n kesto (`ffprobe -show_entries format=duration 'concat:VTS_NN_1.VOB|...'`)
+tunnettuun elokuvan kestoon, koska HandBraken title-numerointi ei ole sama kuin VTS-numero.
+
+Tuloksena syntyy suoraan `mkvpropedit`illä kielitunnisteilla varustettu .mkv jonka voi remuxata
+olemassa olevaan kirjastotiedostoon samalla `mkvmerge -s N,N,N ... --no-video --no-audio`
+-tavalla kuin tänä yönä muissakin korjauksissa.
+
+---
+
+Alkuperäinen tutkimusmuistiinpano (säilytetty historiaksi):
 
 ## Yhteenveto (käyttäjän pyyntöön "tee tekstitysasiasta tehokkaampi")
 
