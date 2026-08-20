@@ -324,3 +324,13 @@ Käyttäjän pyynnöstä ennen uuden rip-dvd.sh-session käynnistämistä. Käyt
 Vahvistettu `_session_has_pending_work()`-funktiolla suoraan (ei arvattu): kaikki 5 sessiota
 eivät enää näy jonossa. Jäljelle jäi 2 aidosti tervettä pending-sessiota (District 9,
 E.T./Dante 01 -sessio) joita EI kosketettu.
+
+## 2026-08-20: District 9 tekstityskorjaus VALMIS
+
+Löytyi tekninen komplikaatio: Part02/03/04 (titlet 6,7,8 HandBraken skannauksessa) jakavat
+saman VTS_01-tiedostojoukon eri PGC-segmentteinä — suora ffmpeg-VOB-konkatenointi (extract_subs_fast.py)
+olisi tuottanut väärin ajastetut tekstitykset koko VTS:n yli. Käytetty sen sijaan HandBraken
+per-titteli-menetelmä (oikea PGC-rajojen käsittely), nopea koska osat lyhyitä (<17min): 13-32s/osa.
+Part 06:lla ei ole ääntä eikä tekstitystä lainkaan — ei korjausta tarvittu. Kaikki kolme korjattua
+osaa vahvistettu (4 raitaa, kesto täsmää). District 9 -teoksen tekstityskorjaus on nyt VALMIS
+kaikkien vielä olemassa olevien osien osalta.
