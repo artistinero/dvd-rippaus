@@ -643,13 +643,24 @@ _print_fail_titles() {
 }
 
 # Palauttaa tosi (exit 0) jos session-hakemistolla on OIKEASTI vielä
-# enkoodusta odottavaa dataa. Kaksi ehtoa: (1) lähde-VOB:eja on yhä levyllä,
-# JA (2) jos viimeisin enkoodausraportti kertoo epäonnistumisia, ainakin yksi
-# niistä EI ole merkitty pysyvästi ohitetuksi. Ilman tätä toista ehtoa sessio,
-# jonka kaikki epäonnistumiset on jo tietoisesti luovutettu, näyttäisi
-# "jonossa"-tilassa ikuisesti — vaikka mitään ei enää oikeasti yritettäisi
-# (lähde-VOB:eja EI poisteta automaattisesti pelkän --skipin takia, joten
-# niiden olemassaolo yksinään ei riitä todisteeksi kesken olevasta työstä).
+# enkoodusta odottavaa dataa. Kaksi erillistä tarkistusta, kumpikin voi yksin
+# päättää että mitään ei ole jäljellä:
+#   (1) Jos viimeisin enkoodausraportti kertoo epäonnistumisia, ainakin yhden
+#       niistä on OLTAVA edelleen ratkaisematta (ei --skipattu).
+#   (2) KORJATTU 2026-08-20: pelkkä "FAIL=0 raportissa" EI riitä todisteeksi
+#       että kaikki on valmista — raportin OK-luku voi olla PIENEMPI kuin
+#       levyn TITLE_COUNT jos osa raidoista on --skipattu vasta raportin
+#       kirjoittamisen JÄLKEEN (--skip ei kirjoita uutta raporttia). Havaittu
+#       käytännössä: District 9:llä OK=4, 6 raitaa --skipattu, TITLE_COUNT=10
+#       (4+6=10, kaikki ratkaistu) mutta funktio palautti silti "pending"
+#       koska FAIL=0 ohitti koko tarkistuksen. Korjaus: lasketaan TITLE_COUNT
+#       yhteen kaikista session_dirin disc-*/meta.conf-tiedostoista, verrataan
+#       raportin OK-lukuun + tämänhetkiseen --skip-määrään (jo-olemassa-olevat
+#       tiedostot terastationilla LASKETAAN "OK":ksi encode_session():ssa,
+#       ks. rivi ~1241, joten OK-luku on aina ajantasainen kokonaismäärä eikä
+#       vain "tämän ajon uudet onnistumiset").
+#   (lähde-VOB:eja EI poisteta automaattisesti pelkän --skipin takia, joten
+#   niiden olemassaolo yksinään ei riitä todisteeksi kesken olevasta työstä).
 _session_has_pending_work() {
     local _sdir="${1%/}/"
     [[ -n "$(find "$_sdir" -name "*.VOB" -size +10M 2>/dev/null | head -1)" ]] || return 1
@@ -664,6 +675,21 @@ _session_has_pending_work() {
                 _title_is_skipped "$_sdir" "$_ft" || _unresolved=1
             done < <(grep '^FAIL_TITLE=' "$_rep" | sed 's/^FAIL_TITLE=//' | cut -d'|' -f1)
             (( _unresolved == 0 )) && return 1
+        fi
+
+        local _ok_n; _ok_n=$(grep '^OK=' "$_rep" 2>/dev/null | cut -d= -f2)
+        if [[ -n "$_ok_n" ]]; then
+            local _total_titles=0 _dmf
+            for _dmf in "${_sdir}"disc-*/meta.conf; do
+                [[ -f "$_dmf" ]] || continue
+                local _tc; _tc=$(grep '^TITLE_COUNT=' "$_dmf" 2>/dev/null | cut -d= -f2)
+                [[ "$_tc" =~ ^[0-9]+$ ]] && (( _total_titles += _tc ))
+            done
+            local _skip_n=0
+            [[ -f "${_sdir}.skip-titles" ]] && _skip_n=$(grep -c . "${_sdir}.skip-titles" 2>/dev/null || echo 0)
+            if (( _total_titles > 0 )) && (( _ok_n + _skip_n >= _total_titles )); then
+                return 1
+            fi
         fi
     fi
     return 0
