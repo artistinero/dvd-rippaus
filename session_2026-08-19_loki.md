@@ -365,3 +365,22 @@ track-numerointia (-s 2,3 piti olla -s 1,2), joka olisi tuottanut täysin ilman 
 olevan tiedoston — huomattiin verifioinnissa ennen kirjastoon kirjoittamista, korjattiin.
 Tästä eteenpäin: TARKISTA AINA track ID:t mkvmerge -J:llä newsub-tiedostosta ennen remux-
 komennon kirjoittamista, älä oleta numerointia.
+
+## Futurama - Bender's Big Score tekstityskorjaus VALMIS (9/10 ekstraa)
+
+Pääelokuva (Part 01, 85min) puuttuu kirjastosta tarkoituksella — aiempi tietoinen luovutuspäätös
+(dokumentoitu projektimuistissa 2026-08-15), ei laajennettu tehtävää sen palauttamiseen.
+9/10 ekstraa korjattu (Part 02,03,04,05,06,07,08,10,11). **Part 09 EI korjattu** — sen kesto
+(1329,053s) ei täsmännyt selkeästi mihinkään raakalähteen titteliin (lähin, title 11, erosi
+7 sekuntia — paljon enemmän kuin päivän muut <1s-erot), ei arvattu, jätetty vanhalla
+tekstityksellä.
+
+## YHTEENVETO: kaikki neljä suunnitelman "Vaihe 3" -kohdetta valmiit
+
+District 9, Burn After Reading, Futurama S04, Bender's Big Score — kaikki käsitelty tänään.
+Yhteensä korjattu tänään tässä erässä: 3+6+4+9 = 22 yksittäistä tiedostoa. Kaikki verifioitu
+rakenteellisesti (raidat, kesto/kehysmäärä) ennen kirjastoon kirjoittamista. Yksi virhe
+(Burn After Reading Part09:n väärä track-numerointi) löydettiin ja korjattiin ennen
+kirjastoon päätymistä. Kaksi tapausta (Burn After Reading Part03/12/13/14 rikkinäiset
+0,48s-tiedostot; Bender's Big Score Part09 epäselvä kestoero) jätettiin tietoisesti
+korjaamatta koska ei voitu varmistaa oikeaa lopputulosta.
