@@ -172,6 +172,13 @@ RIP_TIMEOUT=7200
 ENC_TIMEOUT=14400
 # Montako kertaa yritetään rippata uudelleen epäonnistumisen jälkeen (ei timeoutin jälkeen).
 MAX_RIP_ATTEMPTS=2
+
+# Aikakatkaisu HandBraken --scan-komennolle sekunteina. Normaali skannaus kestää muutaman
+# sekunnin — 3 min on ylikärsivällinen. Lisätty 2026-08-20 sen jälkeen kun havaittiin että
+# vaurioituneella levyllä ("American Beauty") --scan voi jäädä loputtomasti yrittämään yhden
+# esikatselukehyksen hakemista eikä koskaan palaa itsestään — ilman tätä aikakatkaisua koko
+# rip-dvd.sh jäisi ikuisesti jumiin eikä pääsisi koskaan kysymään seuraavaa levyä.
+SCAN_TIMEOUT=180
 # Minimitila brainbinillä enkoodauksen aikana — alle tämän pysäytetään.
 ENC_SPACE_MIN_GB=3
 # Enkoodausnopeusarvio jonon keston laskentaan: GB VOB-dataa tunnissa.
@@ -457,7 +464,7 @@ _get_crop_args() {
     local title_arg=()
     [[ -n "$title_num" ]] && title_arg=(--title "$title_num")
     local scan_out
-    scan_out=$(HandBrakeCLI --input "$input" "${title_arg[@]}" --no-dvdnav --scan 2>&1 </dev/null)
+    scan_out=$(timeout "$SCAN_TIMEOUT" HandBrakeCLI --input "$input" "${title_arg[@]}" --no-dvdnav --scan 2>&1 </dev/null)
     local line
     line=$(grep -o 'autocrop: [0-9]*/[0-9]*/[0-9]*/[0-9]*' <<<"$scan_out" | head -1)
     if [[ -z "$line" ]]; then
@@ -696,7 +703,7 @@ hb_scan_long_titles() {
     # --no-dvdnav: sama kirjastovalinta kuin run_hb():ssa (ks. sen kommentti) —
     # skannaus ja enkoodaus käyttävät aina samaa DVD-lukukirjastoa keskenään,
     # ettei niiden tulkinta levyn rakenteesta pääse eroamaan toisistaan.
-    HandBrakeCLI -i "$dvd_dir" -t 0 --scan --no-dvdnav </dev/null 2>&1 | python3 -c "
+    timeout "$SCAN_TIMEOUT" HandBrakeCLI -i "$dvd_dir" -t 0 --scan --no-dvdnav </dev/null 2>&1 | python3 -c "
 import sys, re
 min_dur = $MIN_DURATION
 cur = None
@@ -2081,7 +2088,7 @@ for u, d in [('G', 1024**3), ('M', 1024**2)]:
         local dvd_inner; dvd_inner=$(find "$dv_dir" -mindepth 1 -maxdepth 1 -type d | head -1)
         local scan_result
         # --no-dvdnav: ks. run_hb():n kommentti samasta lipusta.
-        scan_result=$(HandBrakeCLI -i "$dvd_inner" -t 0 --scan --no-dvdnav </dev/null 2>&1 | python3 -c "
+        scan_result=$(timeout "$SCAN_TIMEOUT" HandBrakeCLI -i "$dvd_inner" -t 0 --scan --no-dvdnav </dev/null 2>&1 | python3 -c "
 import sys, re
 min_dur = $MIN_DURATION
 cur = None
