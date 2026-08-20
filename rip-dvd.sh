@@ -1882,6 +1882,12 @@ main() {
     # session ajan, jotta ask_meta() voi ehdottaa sitä seuraavallakin levyllä.
     local p_max_ep_suggest=""
     local disc_num=0
+    # Muistaa VIIMEISIMMÄN levyn nimen jolta löytyi oikea MOVIE_TITLE_NUM (ei "0").
+    # Käytetään turvallisemman aikakatkaisu-oletuksen valintaan monilevyisille
+    # elokuville/dokumenteille — ks. kommentti alempana MOVIE_TITLE_NUM-kysymyksen
+    # kohdalla (käyttäjän 2026-08-20 huomauttama riski: pelkkiä ekstroja sisältävä
+    # 2. levy saisi väärin "elokuva"-tunnisteen jos kukaan ei ehdi vastata).
+    local _last_movie_name=""
 
     # ── Rippaussilmukka: lisää levyjä kunnes käyttäjä kirjoittaa 'q' ─────────
     while true; do
@@ -2177,14 +2183,34 @@ for line in sys.stdin.buffer:
                 { split($2, h, ":"); s = h[1]*3600 + h[2]*60 + h[3]
                   if (s > max) { max = s; t = $1 } }
                 END { print t }')
+            # TURVALLISEMPI OLETUS MONILEVYISEN TEOKSEN 2.+ LEVYLLE (lisätty
+            # 2026-08-20, käyttäjän havaitsema riski): jos SAMAN NIMISELTÄ
+            # teokselta on JO AIEMMIN tässä sessiossa löytynyt oikea elokuvaraita
+            # (_last_movie_name täsmää), tämä levy on todennäköisesti pelkkiä
+            # ekstroja sisältävä bonuslevy — moni DVD-julkaisu jakaa elokuvan
+            # levylle 1 ja bonusmateriaalin levylle 2+. Jos kukaan ei ehdi
+            # vastata 180s:ssa, oletusarvo on TÄLLÖIN "0" (ei elokuvaa) eikä
+            # "pisin raita" — koska väärä "ekstra merkitty elokuvaksi" on
+            # pahempi ja hämmentävämpi lopputulos soittimessa kuin väärä
+            # "elokuva merkitty ekstraksi" (jälkimmäinen säilyttää sisällön
+            # tallessa, vain väärässä tiedostonimessä, korjattavissa jälkikäteen).
+            local _default_t="$_longest_t" _default_hint="raita ${_longest_t}"
+            local _is_continuation_disc=0
+            if [[ -n "$_last_movie_name" && "$_last_movie_name" == "$p_name" ]]; then
+                _is_continuation_disc=1
+                _default_t="0"
+                _default_hint="0 (ei elokuvaa — sama nimi kuin edellisellä levyllä, oletetaan bonuslevyksi)"
+            fi
             local asked_movie=""
             # "0" = erikoisarvo: TÄLLÄ levyllä ei ole itse teosta lainkaan, vain
             # ekstroja (esim. erillinen bonuslevy). Kaikki raidat menevät silloin
             # ekstroiksi saman nimen alle, ei yritetä arvata mikä olisi "elokuva".
-            read -rp "  Mikä raita on itse ${_mtn_lbl}? (Enter = pisin, raita ${_longest_t} / 0 = ei tällä levyllä, kaikki ekstroja) [180s → raita ${_longest_t}]: " -t 180 asked_movie </dev/tty || true
+            read -rp "  Mikä raita on itse ${_mtn_lbl}? (Enter = pisin, raita ${_longest_t} / 0 = ei tällä levyllä, kaikki ekstroja) [180s → ${_default_hint}]: " -t 180 asked_movie </dev/tty || true
             local movie_title_num="$asked_movie"
             if [[ -z "$movie_title_num" ]]; then
-                movie_title_num="$_longest_t"
+                movie_title_num="$_default_t"
+                (( _is_continuation_disc )) && [[ "$movie_title_num" == "0" ]] && \
+                    log "  180s aikakatkaisu — sama nimi kuin edellisellä levyllä, oletetaan pelkkiä ekstroja (turvallisempi oletus)"
             elif [[ "$movie_title_num" == "0" ]]; then
                 : # sellaisenaan — käsitellään erikseen alla ja encode_session():issa
             elif ! [[ "$movie_title_num" =~ ^[0-9]+$ ]] || \
@@ -2196,6 +2222,7 @@ for line in sys.stdin.buffer:
             if [[ "$movie_title_num" == "0" ]]; then
                 log "  Ei itse ${_mtn_lbl}ta tällä levyllä — kaikki ${title_count} raitaa ekstroiksi"
             else
+                _last_movie_name="$p_name"
                 log "  Itse ${_mtn_lbl}: raita ${movie_title_num} (${title_count} raitaa yhteensä)"
             fi
         fi
