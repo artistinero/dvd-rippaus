@@ -297,13 +297,26 @@ throttle_loop() {
             kill -KILL "${hb_pids[@]}" 2>/dev/null || true
             log "  HÄTÄSAMMUTUS: ${temp}°C ylittää TEMP_KILL=${TEMP_KILL}°C — HandBrakeCLI tapettu!"
             paused=0
-        elif (( temp >= TEMP_WARN )) && (( paused == 0 )); then
+        elif (( temp >= TEMP_WARN )); then
             # Lämpötila liian korkea — laitetaan enkoodausohjelma tauolle.
             # Tauolle laitettu ohjelma säilyy muistissa ja jatkaa täsmälleen
             # samasta kohdasta kun sen annetaan myöhemmin jatkaa.
+            #
+            # HUOM (löydetty ja korjattu 2026-08-21 koodikatselmoinnissa):
+            # kill -STOP lähetetään AINA kun lämpö on yhä liian korkea, EI
+            # vain silloin kun paused vasta muuttuu 0→1. Ilman tätä uusi
+            # HandBrakeCLI-prosessi joka käynnistyy KESKEN kuumuuspaussin
+            # (esim. manuaalisesti flockin ohi ajettu, kuten tässä projektissa
+            # on tehty) jäisi kokonaan suojaamattomaksi TEMP_KILL-hätärajaan
+            # asti, koska hb_pids luetaan uudelleen joka kierroksella mutta
+            # paused==0-ehto esti STOP:in uusintalähetyksen. kill -STOP jo
+            # pysäytetylle prosessille on harmiton no-op, joten tämä on
+            # turvallista tehdä joka kierros ilman sivuvaikutuksia.
             kill -STOP "${hb_pids[@]}" 2>/dev/null || true
-            paused=1
-            log "  Throttle: paussi ${temp}°C (raja: ${TEMP_WARN}°C)"
+            if (( paused == 0 )); then
+                paused=1
+                log "  Throttle: paussi ${temp}°C (raja: ${TEMP_WARN}°C)"
+            fi
         elif (( temp <= TEMP_RESUME )) && (( paused == 1 )); then
             # Lämpötila on jäähtynyt riittävästi — annetaan tauolla olevan
             # ohjelman jatkaa työtään.
@@ -388,11 +401,12 @@ wait_for_terastation() {
 # VBI-jäännöstä kuvan aivan yläreunassa (mitattu suoraan pikseliarvoista:
 # rivit 0-2 keskikirkkaus ~26, rivi 3 siirtymä ~19, rivi 4+ normaali kuva
 # ~12) — se ei ole tarpeeksi tummaa jotta HandBraken automaattinen
-# --crop-mode auto tunnistaisi sen mustaksi reunaksi ja poistaisi sen.
-# Pakotetaan siis vähintään tämä verran ylärajausta aina, automaattisen
-# tunnistuksen löytämän arvon PÄÄLLE (ei sen sijaan). 6px on häviävän pieni
-# osa kuvan korkeudesta (alle 1% PAL:n 576 pikselistä) eikä siis leikkaa
-# havaittavasti oikeaa kuvasisältöä levyillä joilla tätä häiriötä ei ole.
+# --crop-mode auto tunnistaisi sen mustaksi reunaksi ja poistaisi sen. Tämä
+# on se rajausmäärä jota käytetään SILLOIN KUN _detect_top_artifact() alla
+# mittaa häiriön oikeasti olevan läsnä (ks. seuraava kommentti — EI koskaan
+# sokeasti kaikille levyille). 6px on häviävän pieni osa kuvan korkeudesta
+# (alle 1% PAL:n 576 pikselistä) eikä siis leikkaa havaittavasti oikeaa
+# kuvasisältöä levyillä joilla tätä häiriötä ei ole.
 readonly MIN_TOP_CROP_PX=6
 
 # TÄRKEÄ KORJAUS 2026-08-19: alkuperäinen versio pakotti MIN_TOP_CROP_PX:n
@@ -1058,11 +1072,25 @@ encode_session() {
         local dest; dest=$(dest_path "$type" "$name" "$season")
 
         # Tarkista että dvdbackup-hakemisto on olemassa.
-        # Jos ei ole, levy on joko ripattu epäonnistuneesti tai tämä on tyhjä sessio.
+        #
+        # HUOM (löydetty 2026-08-21 koodikatselmoinnissa): tämä EI ole
+        # merkki epäonnistuneesta rippauksesta, vaikka aiemmin lokiin
+        # kirjoitettiin virheellisesti "VIRHE" tästä. main() käynnistää
+        # jokaisen ripatun levyn jälkeen UUDEN --encode-only-session koko
+        # session-hakemistolle (ks. main(), disc_num-silmukan loppu) — eli
+        # moniLevyisessä sessiossa encode_session() ajetaan kerran per levy
+        # ja skannaa AINA kaikki session-hakemiston meta.conf-tiedostot
+        # uudelleen alusta. Jos jokin aiempi levy on jo ehditty täysin
+        # enkoodata ja siirtää terastationille, sen dvdbackup-lähdekansio on
+        # jo poistettu (_cleanup_disc_if_done, rm -rf) — tämä on siis
+        # NORMAALI, ODOTETTU tila eikä virhe. Todistettu ettei muuta polkua
+        # ole: epäonnistunut rippaus poistaa AINA koko raw_dir:in (myös
+        # meta.confin) kokonaan main()ssa, joten meta.conf joka löytyy mutta
+        # jonka dvdbackup-kansio puuttuu tarkoittaa AINA "valmis ja siivottu".
         local dvd_dir
         dvd_dir=$(find "${raw_dir}/dvdbackup" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)
         if [[ -z "$dvd_dir" ]]; then
-            log "VIRHE: dvdbackup-hakemisto ei löydy — ${raw_dir##*/} (ohitetaan)"
+            log "  (jo valmis ja siivottu, ei enää enkoodattavaa: ${raw_dir##*/})"
             continue
         fi
 
@@ -1188,7 +1216,7 @@ encode_session() {
         _src_total["$_qs"]=$(( ${_src_total["$_qs"]:-0} + 1 ))
     done < "$queue"
     declare -A _src_done=()
-    local _rep_ok=0 _rep_fail=() _rep_skip=0
+    local _rep_ok=0 _rep_fail=() _rep_skip=0 _rep_untried=0
     local _rep_start; _rep_start=$(date '+%Y-%m-%d %H:%M:%S')
 
     # Vapauta dvdbackup-hakemisto heti kun kaikki levyn raidat ovat terastationilla.
@@ -1253,7 +1281,16 @@ encode_session() {
         local enc_free_gb
         enc_free_gb=$(df "$OUTBASE" | awk 'NR==2 {printf "%d", $4/1024/1024}')
         if (( enc_free_gb < ENC_SPACE_MIN_GB )); then
-            log "VIRHE: Brainbinillä kriittisen vähän tilaa (${enc_free_gb} GB < ${ENC_SPACE_MIN_GB} GB) — pysäytetään enkoodaus"
+            # HUOM (korjattu 2026-08-21): loput jonon raidat EIVÄT saa
+            # kadota jäljetönä lopullisesta raportista pelkkänä erotuksena
+            # (total_titles - OK - FAIL) — aiemmin break jätti ne kokonaan
+            # laskematta, jolloin esim. "12 onnistui, 3 epäonnistui" saattoi
+            # todellisuudessa tarkoittaa että 5 muuta raitaa ei edes
+            # yritetty. _rep_untried tallentaa tämän erikseen ja se näkyy
+            # sekä lokissa että ntfy-loppuraportissa.
+            local _untried=$(( total_titles - done_n + 1 ))
+            log "VIRHE: Brainbinillä kriittisen vähän tilaa (${enc_free_gb} GB < ${ENC_SPACE_MIN_GB} GB) — pysäytetään enkoodaus, ${_untried} raitaa jää kokonaan yrittämättä"
+            _rep_untried=$_untried
             break
         fi
 
@@ -1485,6 +1522,7 @@ Jonossa (${_remaining_n}):${_queue_list}${_other_line}"
         echo "OK=${_rep_ok}"
         echo "FAIL=${#_rep_fail[@]}"
         echo "SKIP=${_rep_skip}"
+        echo "UNTRIED=${_rep_untried}"
         local _rf
         for _rf in "${_rep_fail[@]}"; do echo "FAIL_TITLE=${_rf}"; done
     } > "${session_dir}/.encode-report.tmp"
@@ -1497,7 +1535,7 @@ Jonossa (${_remaining_n}):${_queue_list}${_other_line}"
     local _fail_lines="" _rf
     for _rf in "${_rep_fail[@]}"; do _fail_lines+=$'\n'"- ${_rf}"; done
     local _prio="default"
-    (( ${#_rep_fail[@]} > 0 )) && _prio="high"
+    (( ${#_rep_fail[@]} > 0 || _rep_untried > 0 )) && _prio="high"
 
     local _other; _other=$(_other_sessions_pending "$session_dir")
     local _title="DVD-enkoodausjono tyhjä ✓"
@@ -1509,12 +1547,14 @@ Jonossa (${_remaining_n}):${_queue_list}${_other_line}"
 
     local _skip_note=""
     (( _rep_skip > 0 )) && _skip_note=", ${_rep_skip} ohitettu pysyvästi (--skip)"
+    local _untried_note=""
+    (( _rep_untried > 0 )) && _untried_note=", ${_rep_untried} jäi kokonaan yrittämättä (tila loppui)"
 
     notify "$_title" \
-"${_rep_ok} onnistui, ${#_rep_fail[@]} epäonnistui${_skip_note} — $(fmt_time "$total_secs")${_fail_lines}${_other_line}" \
+"${_rep_ok} onnistui, ${#_rep_fail[@]} epäonnistui${_skip_note}${_untried_note} — $(fmt_time "$total_secs")${_fail_lines}${_other_line}" \
         "$_prio"
 
-    log "═══ Enkoodaus valmis — yhteensä $(fmt_time "$total_secs") (${_rep_ok} onnistui, ${#_rep_fail[@]} epäonnistui${_skip_note}) ═══"
+    log "═══ Enkoodaus valmis — yhteensä $(fmt_time "$total_secs") (${_rep_ok} onnistui, ${#_rep_fail[@]} epäonnistui${_skip_note}${_untried_note}) ═══"
 
     # Muistuta lukuvirhelevyistä session lopussa
     while IFS= read -r mf; do
@@ -1727,10 +1767,13 @@ show_recent_reports() {
     for _d in "$OUTBASE"/session_*/; do
         local _r="${_d}.encode-report"
         [[ -f "$_r" ]] || continue
-        local _ok _fail _skip _finished
+        local _ok _fail _skip _untried _finished
         _ok=$(grep '^OK='       "$_r" 2>/dev/null | cut -d= -f2)
         _fail=$(grep '^FAIL='   "$_r" 2>/dev/null | cut -d= -f2)
         _skip=$(grep '^SKIP='   "$_r" 2>/dev/null | cut -d= -f2)
+        # UNTRIED puuttuu vanhoista, ennen 2026-08-21 kirjoitetuista
+        # raporteista — ${:-0} alempana käsittelee sen turvallisesti.
+        _untried=$(grep '^UNTRIED=' "$_r" 2>/dev/null | cut -d= -f2)
         _finished=$(grep '^FINISHED=' "$_r" 2>/dev/null | cut -d= -f2-)
 
         # Kootaan sarjan/elokuvan/yms. nimet tästä sessiosta, ilman
@@ -1754,14 +1797,15 @@ show_recent_reports() {
         fi
 
         (( _any++ )) || true
-        local _total=$(( ${_ok:-0} + ${_fail:-0} + ${_skip:-0} ))
+        local _total=$(( ${_ok:-0} + ${_fail:-0} + ${_skip:-0} + ${_untried:-0} ))
         local _date="${_finished%% *}"
 
-        if [[ "${_fail:-0}" == "0" ]]; then
+        if [[ "${_fail:-0}" == "0" && "${_untried:-0}" == "0" ]]; then
             printf '  ✓ %-42s %d/%d OK  [%s]\n' "$_lbl" "$_total" "$_total" "$_date"
         else
             local _skip_suffix=""
             (( ${_skip:-0} > 0 )) && _skip_suffix=", ${_skip} ohitettu pysyvästi"
+            (( ${_untried:-0} > 0 )) && _skip_suffix+=", ${_untried} jäi yrittämättä (tila loppui)"
             printf '  ✗ %-42s %d/%d OK, %d epäonnistui%s  [%s]\n' \
                 "$_lbl" "${_ok:-0}" "$_total" "${_fail:-0}" "$_skip_suffix" "$_date"
             _print_fail_titles "$_d" "$_r" 0
