@@ -995,6 +995,28 @@ _other_sessions_pending() {
 encode_session() {
     local session_dir="$1"
 
+    # ── Taso A: per-session-hakemisto-lukko (rinnakkaisenkoodauksen 1. vaihe) ──
+    # Suojaa TÄMÄN session-hakemiston jaettuja tiedostoja (.queue, .encode-report,
+    # .skip-titles) siltä että kaksi ERI --encode-only-kutsua käsittelisi samaa
+    # session-hakemistoa yhtä aikaa. Tämä on todistetusti yleinen tilanne tässä
+    # projektissa: main() käynnistää oman --encode-only-kutsunsa JOKAISEN ripatun
+    # levyn jälkeen samalle session-hakemistolle, joten monta kutsua saman
+    # session-hakemiston käsittelyyn on tavallista, ei harvinainen reunatapaus.
+    #
+    # Tämä lukko on TÄYSIN itsenäinen alla olevasta globaalista ENCODE_LOCKFILE-
+    # lukosta eikä riipu siitä millään tavalla — ei siis deadlock-riskiä eri
+    # session-hakemistojen välillä, koska niillä on aina eri lukkotiedosto.
+    local session_lock_fd
+    exec {session_lock_fd}>"${session_dir}/.encode.lock"
+    if ! flock -n "$session_lock_fd"; then
+        log "  Toinen käsittelijä on jo aktiivinen tälle session-hakemistolle — odotetaan..."
+        flock "$session_lock_fd"
+        log "  Session-lukko saatu"
+    fi
+    # Lukko pysyy voimassa koko funktion ajan, vapautuu automaattisesti kun
+    # funktio päättyy (fd sulkeutuu) — sama periaate kuin alla olevalla
+    # globaalilla lukolla.
+
     # ── Varmistetaan että vain yksi muunnos on käynnissä kerrallaan ─────────
     # Jos kaksi muunnosta pyörisi yhtä aikaa, tietokone ylikuumenisi (molemmat
     # kuormittaisivat prosessoria täysillä samaan aikaan). Tämä lukitusmekanismi
