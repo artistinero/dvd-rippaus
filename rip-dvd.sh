@@ -1369,15 +1369,15 @@ encode_session() {
             mkdir -p "$dest" || { log "  VIRHE: kohdepolun luonti epäonnistui yrityksistä huolimatta: ${dest}"; continue; }
         fi
 
-        # Odota viilentymistä ennen enkoodauksen aloitusta.
-        # Kriittistä SIGKILL-tilanteen jälkeen: ilman tätä seuraava raita käynnistyisi
-        # välittömästi vaikka CPU on edelleen ylikuumentunut.
-        local _pre_temp; _pre_temp=$(get_temp)
-        if (( _pre_temp > TEMP_RESUME )); then
-            log "  Odotetaan viilentymistä ennen seuraavaa raitaa (${_pre_temp}°C > ${TEMP_RESUME}°C)..."
-            while (( $(get_temp) > TEMP_RESUME )); do sleep 15; done
-            log "  Lämpö laskenut ($(get_temp)°C) — aloitetaan enkoodaus"
-        fi
+        # HUOM (poistettu 2026-08-22): tässä oli aiemmin erillinen tarkistus joka
+        # pysäytti JOKAISEN raidan alun jos lämpö oli yli TEMP_RESUME(50°C) —
+        # laajeni virheellisesti koskemaan kaikkia raitoja vaikka alkuperäinen
+        # tarkoitus (commit 9ee9905, 2026-07-25) oli vain estää seuraavan raidan
+        # käynnistyminen HETI SIGKILL-hätätapauksen jälkeen. Käyttäjä vahvisti
+        # 2026-08-22 ettei tätä erillistä tarkistusta ole koskaan pyydetty —
+        # ainoa haluttu käytös on `throttle_loop`:in oma jatkuva 85°C-pysäytys/
+        # 50°C-jatko -mekanismi, joka jo kattaa tämän koko enkoodauksen ajan
+        # ilman erillistä raitojen-välistä tarkistusta.
 
         run_hb "$src" "$out" "$title_num" "$out_name"
         local rc=$?
