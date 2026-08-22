@@ -1757,14 +1757,53 @@ Jonossa (${_remaining_n}):${_queue_list}${_other_line}"
 
     done < "$queue"
 
-    # HUOM: _PENDING_RETRY-listan loppuunkäsittely (blokkaava "sooloputki"
-    # niille kohdekansioille jotka eivät koskaan vapautuneet tämän silmukan
-    # aikana) toteutetaan Tason C:n dispatch-silmukan yhteydessä, joka
-    # korvaa tämän synkronisen `while`-silmukan — ei tässä vielä, koska tässä
-    # vaiheessa (yksi enkoodaus kerrallaan globaalisti) _PENDING_RETRY on
-    # todistetusti aina tyhjä: kaksi encode_session()-kutsua ei voi koskaan
-    # olla samaan aikaan jonon rakennusvaiheessa niin kauan kuin globaali
-    # lukko sallii vain yhden kerrallaan koko käsittelyn ajan.
+    # "Sooloputki": jos jokin ekstra jäi vielä _PENDING_RETRY-listalle (Taso B
+    # skippasi sen koska sen kohdekansio oli toisen SAMAAN AIKAAN käynnissä
+    # olevan itsenäisen --encode-only-prosessin käytössä — tämä on nyt
+    # mahdollista Tason C:n myötä, kun useampi prosessi voi olla globaalin
+    # semaforin sisällä yhtä aikaa), odotetaan BLOKKAAVASTI kunnes se toinen
+    # prosessi vapauttaa kohdekansion, ja käsitellään loput ylimääräisenä
+    # kierroksena. `_flush_pending_retry 1` (blokkaava) EI PALAA ennen kuin
+    # KAIKKI listalla olevat on ratkaistu ja lisätty jonoon.
+    #
+    # Käsitellään VAIN äsken lisätyt UUDET rivit (`tail -n +$((_lines_before+1))`),
+    # ei koko jonoa uudelleen alusta — muuten jo EPÄONNISTUNEET rivit
+    # yritettäisiin uudelleen pyytämättä ja kirjautuisivat _rep_fail-listalle
+    # kahdesti. Jo ONNISTUNEET rivit eivät tästä kärsisi (Tarkistus 1 estäisi
+    # tuplaenkoodauksen), mutta epäonnistuneet kärsisivät — siksi tarkka rajaus.
+    if (( ${#_PENDING_RETRY[@]} > 0 )); then
+        log "  Odotetaan ${#_PENDING_RETRY[@]} levyn ekstrojen kohdekansion vapautumista (sooloputki)..."
+        local _lines_before; _lines_before=$(wc -l < "$queue")
+        _flush_pending_retry 1
+        local _new_lines; _new_lines=$(( $(wc -l < "$queue") - _lines_before ))
+        total_titles=$(( total_titles + _new_lines ))
+        while IFS=$'\x1f' read -r src out_name dest title_num disc_label disc_n; do
+            (( done_n++ )) || true
+            if _title_is_skipped "$session_dir" "$out_name"; then
+                log "  Ohitetaan pysyvästi (merkitty luovutuksi --skipillä): ${out_name}"
+                (( _rep_skip++ )) || true
+                continue
+            fi
+            log "Enkoodataan (sooloputki, $done_n/$total_titles): ${out_name} [${disc_label}]"
+            local out="${enc_dir}/${out_name%.mkv}.tmp.mkv"
+            mkdir -p "$dest" 2>/dev/null || true
+            run_hb "$src" "$out" "$title_num" "$out_name"
+            local rc=$?
+            local out_sz_bytes; out_sz_bytes=$(stat -c%s "$out" 2>/dev/null || echo 0)
+            if (( rc == 0 )) && (( out_sz_bytes > 1048576 )); then
+                local final="${enc_dir}/${out_name}"
+                mv "$out" "$final" && mv "$final" "${dest}/" && {
+                    log "  ✓ ${out_name} [sooloputki]"
+                    (( _rep_ok++ )) || true
+                    _cleanup_disc_if_done "$src"
+                }
+            else
+                rm -f "$out"
+                log "  VIRHE: enkoodaus epäonnistui sooloputkessa — ${out_name} (rc=${rc})"
+                _rep_fail+=("${out_name}|rc=${rc} (sooloputki)")
+            fi
+        done < <(tail -n "+$((_lines_before + 1))" "$queue")
+    fi
 
     # ── Lähdesiivous: turvaverkko ─────────────────────────────────────────────
     # Normaalitilanteessa _cleanup_disc_if_done() on jo siivonnut levyt yksi kerrallaan.
