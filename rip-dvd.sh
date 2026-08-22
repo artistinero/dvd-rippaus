@@ -783,6 +783,53 @@ dest_path() {
     esac
 }
 
+# ── Rinnakkaisenkoodauksen Taso B: per-kohdekansio-varaus ───────────────────
+# Estää kahta ERI session-hakemistoa laskemasta ekstranumeroita SAMALLE
+# kohdekansiolle yhtä aikaa (mikä voisi johtaa siihen että molemmat päätyvät
+# samaan numeroon, koska molemmat lukisivat saman — vielä päivittämättömän —
+# tiedostomäärän). Käyttäjän 2026-08-23 yksinkertaistus: sen sijaan että
+# numeron laskenta siirrettäisiin monimutkaisesti kirjoitushetkeen asti, koko
+# kyseisen kohdekansion käsittely (numerointi mukaan lukien) vain jätetään
+# tekemättä TÄLLÄ kierroksella jos toinen käynnissä oleva session on jo
+# varannut saman kohdekansion — se käsitellään seuraavalla --encode-only-
+# kierroksella kun kohdekansio on taas vapaa.
+#
+# Yksi varaus pysyy voimassa koko encode_session()-kutsun loppuun asti (ei
+# vapauteta heti numeroinnin jälkeen) — tämä on tarkoituksella varovainen
+# valinta: kun sessio on kerran ottanut kohdekansion "omakseen", se pitää sen
+# loppuun asti eikä anna toisen session vuorotella sen kanssa kesken kaiken.
+declare -A _DEST_LOCK_FDS=()
+
+# Palauttaa 0 (onnistui) jos kohdekansio saatiin varattua, 1 jos joku toinen
+# käynnissä oleva session pitää sitä jo hallussaan. Ei-blokkaava.
+dest_lock_try_acquire() {
+    local dest="$1"
+    [[ -n "${_DEST_LOCK_FDS[$dest]:-}" ]] && return 0  # jo omassa hallussa
+    local hash lockdir="/tmp/rip-dvd-dest-locks" lockpath fd
+    mkdir -p "$lockdir"
+    hash=$(printf '%s' "$dest" | md5sum | cut -d' ' -f1)
+    lockpath="${lockdir}/${hash}.lock"
+    exec {fd}>"$lockpath"
+    if flock -n "$fd"; then
+        _DEST_LOCK_FDS["$dest"]="$fd"
+        return 0
+    else
+        eval "exec ${fd}>&-"
+        return 1
+    fi
+}
+
+# Vapauttaa KAIKKI tämän encode_session()-kutsun hallussa olevat kohdekansio-
+# varaukset. Kutsutaan _encode_cleanup()-funktiosta (ajetaan sekä normaalissa
+# että keskeytyneessä lopetuksessa).
+dest_lock_release_all() {
+    local d
+    for d in "${!_DEST_LOCK_FDS[@]}"; do
+        eval "exec ${_DEST_LOCK_FDS[$d]}>&-"
+        unset '_DEST_LOCK_FDS[$d]'
+    done
+}
+
 # Korvaa tiedostojärjestelmissä kiellettyjä merkkejä viivalla.
 # / on kriittisin (rikkoo polurakenteen), mutta SMB-levyllä myös muut merkit ovat kiellettyjä.
 sanitize_name() {
@@ -1196,6 +1243,19 @@ encode_session() {
         # Rakenna jonorivi ekstraraidoille
         # extra_num lasketaan terastationin olemassa olevista + jo jonossa olevista,
         # jotta extrat numeroituvat oikein eri sessioiden välillä.
+        #
+        # Taso B -varaus: jos jokin TOINEN käynnissä oleva session on jo
+        # varannut tämän kohdekansion, ekstranumerointi jätetään TÄLLÄ
+        # kierroksella tekemättä (ei lasketa extra_num:ia, ei kirjoiteta
+        # jonoriviä) — muuten kaksi session voisi laskea saman numeron
+        # samasta (vielä päivittämättömästä) tiedostomäärästä. Tämän levyn
+        # ekstrat käsitellään seuraavalla --encode-only-kierroksella kun
+        # kohdekansio on taas vapaa. Ei koske jaksoraitoja (yllä) koska
+        # niillä ei ole juoksevaa numerointia joka voisi törmätä.
+        if (( ${#extra_titles[@]} > 0 )) && ! dest_lock_try_acquire "$dest"; then
+            log "  Kohdekansio varattuna toisen session toimesta — ${#extra_titles[@]} ekstraa (${raw_dir##*/}) käsitellään myöhemmin"
+            extra_titles=()
+        fi
         local _epat _n_tera _n_queue extra_num
         if [[ "$type" == series ]]; then
             _epat="${name} S$(printf '%02d' "$season") Extra"
@@ -1275,6 +1335,7 @@ encode_session() {
         fi
         kill "$tpid" 2>/dev/null || true
         wait "$tpid" 2>/dev/null || true
+        dest_lock_release_all
         trap - INT TERM
     }
     trap "_encode_cleanup; exit 1" INT TERM
