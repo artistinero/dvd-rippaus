@@ -44,6 +44,14 @@ Vasta KUN suora `dvdbackup`/`HandBrakeCLI --input /dev/srN` -yritys epäonnistuu
 tämä on hitaampi ja monimutkaisempi reitti, ei oletustapa. Sopii erityisesti:
 - "2012" (READ_ERRORS=159, pääelokuva epäonnistuu heti 0,57s kohdalla)
 - American Beauty (skannaus jumiutuu tittelin 1 esikatselussa)
+- **Asterix and the Vikings (2006)** — lisätty 2026-08-22. `dvdbackup` jäi taistelemaan samaa
+  viallista kohtaa vastaan (`Error reading VTS_01_1.VOB at block 629`) niin pitkään että
+  kopioitu määrä paisui 22,19 GB:hen (levyn oikea sisältö ~7,9GB, DVD-9/kaksikerroksinen, kaksi
+  title setiä VTS_01+VTS_02) ennen kuin `RIP_TIMEOUT` (2h) katkaisi sen väkisin. `dmesg`
+  vahvisti aidon fyysisen vaurion: toistuvia "critical medium error"/"L-EC uncorrectable error"
+  -merkintöjä sektoreilla n. 809960, 815528, 101941-101943 (klo 21:54-21:55). Koko keskeneräinen
+  data siivottiin automaattisesti pois epäonnistumisen jälkeen (ei jäänyt mitään talteen) —
+  vaatii levyn uudelleen asemaan ja täyden `ddrescue`-yrityksen tästä alusta.
 - Muut tulevat samantyyppiset tapaukset
 
 ## EI VIELÄ TEHTY
