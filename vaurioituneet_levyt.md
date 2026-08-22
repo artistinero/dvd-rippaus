@@ -54,6 +54,26 @@ tämä on hitaampi ja monimutkaisempi reitti, ei oletustapa. Sopii erityisesti:
   vaatii levyn uudelleen asemaan ja täyden `ddrescue`-yrityksen tästä alusta.
 - Muut tulevat samantyyppiset tapaukset
 
+## LÖYDETTY VAKAVA RAJOITUS 2026-08-22: ddrescue ei toimi salatuille DVD-levyille sellaisenaan
+
+Testattiin ensimmäistä kertaa oikeasti käytännössä (Asterix and the Vikings, 2026-08-22).
+`ddrescue` lukee raakoja 2048-tavun sektoreita suoraan `/dev/sr1`:stä OHITTAEN normaalin CSS-
+todennuksen jota `dvdbackup`/`libdvdcss` käyttävät. Tulos: valtaosa lukuyrityksistä epäonnistui
+virheeseen **"Illegal Request: Read of scrambled sector without authentication"** — TÄMÄ ON ERI
+VIRHE kuin aiemmin dmesg:llä vahvistettu fyysinen vaurio ("critical medium error"/"L-EC
+uncorrectable"), ja se ilmeni jo levyn alkupäässä (sektori ~88960), ei vain tunnetulla
+vaurioalueella. Trendi: 46 lukuvirhettä 26s kohdalla → 205 virhettä 1min27s kohdalla, "rescued"
+(oikeasti pelastettu data) vain 35MB/447MB käydystä — valtaosa sektoreista palautui "scrambled"-
+tilassa, ei käyttökelpoisena datana. Arvioitu kokonaisaika paisui 1h39min:stä 9h29min:iin.
+Pysäytetty ja siivottu (ei jätetty osittaista tiedostoa).
+
+**Johtopäätös: tämän dokumentin `ddrescue`-proseduuri EI SELLAISENAAN toimi salatuille
+kaupallisille DVD-levyille** — vaatisi CSS-avainten esineuvottelun (esim. `libdvdcss`:n kautta)
+ennen raakalukua, mitä ei ole toteutettu eikä tutkittu. Ei tiedetä onko tämä ylipäätään
+ratkaistavissa `ddrescue`:lla vai vaatiiko täysin eri työkalun. **Asterix and the Vikings on
+edelleen ratkaisematta** — ainoat jäljellä olevat vaihtoehdot ovat toinen fyysinen kappale tai
+luovuttaminen, ellei parempaa CSS-yhteensopivaa palautustyökalua löydy.
+
 ## EI VIELÄ TEHTY
 
 - Ei testattu käytännössä oikealla vaurioituneella levyllä tänä yönä (kumpikaan tunnetuista
