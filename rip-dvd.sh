@@ -847,6 +847,84 @@ dest_lock_acquire_blocking() {
     _DEST_LOCK_FDS["$dest"]="$fd"
 }
 
+# ── Rinnakkaisenkoodauksen Taso C: globaali N-paikkainen semafori ───────────
+# PARALLEL-asetus luetaan TUOREENA config-tiedostosta JOKA KERTA kun paikkaa
+# yritetään varata — EI kerran välimuistiin skriptin käynnistyessä. Tämä on
+# tarkoituksellista: sama virhe kuin tämän illan (2026-08-22) 50°C-tarkistus-
+# bugissa (vanha käynnissä oleva prosessi käytti muistiin ladattua vanhaa
+# arvoa) EI SAA TOISTUA TÄSSÄ. Tuore luku joka kerta tarkoittaa että asetuksen
+# muuttaminen kesken ajon vaikuttaa jo käynnissä olevien encode_session()-
+# kutsujen SEURAAVAAN dispatch-yritykseen ilman uudelleenkäynnistystä.
+RIP_DVD_CONFIG_FILE="${RIP_DVD_CONFIG_FILE:-$HOME/.config/rip-dvd/config}"
+GLOBAL_SLOT_DIR="${GLOBAL_SLOT_DIR:-/tmp/rip-dvd-slots}"
+
+# Ensimmäinen versio (2026-08-23): hyväksyy vain 1 tai 2. Vaikka Tasot A/B/C
+# ovat rakenteeltaan jo N-yleisiä, itse rinnakkaisajoa ei ole testattu yli
+# kahdella tällä raudalla — tiukempi raja on turvallisempi kuin sallia
+# testaamaton alue oletuksena. Nostetaan myöhemmin kun on mitattu.
+read_max_parallel() {
+    local val
+    val=$(grep -m1 '^PARALLEL=' "$RIP_DVD_CONFIG_FILE" 2>/dev/null | cut -d= -f2)
+    if [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 1 && val <= 2 )); then
+        echo "$val"
+    else
+        echo 1   # turvallinen oletus jos tiedostoa/riviä ei ole tai arvo virheellinen
+    fi
+}
+
+# Yrittää saada minkä tahansa vapaan paikan 1..N. Palauttaa saadun paikan
+# numeron stdoutiin ja exit 0, tai exit 1 jos kaikki varattuja. Ei-blokkaava.
+# HUOM: paikan FD EI säily kutsujan hallussa tämän funktion palattua (se on
+# oma paikallinen muuttujansa) — vapautus tehdään tiedoston POISTOLLA
+# (global_slot_release), ei FD:n sulkemisella, koska paikka pitää pystyä
+# vapauttamaan TOISESTA prosessista/aliprosessista kuin joka sen varasi
+# (taustalle haarautunut raidan käsittelijä).
+#
+# Kuolleen prosessin siivous: paikkatiedostoon kirjoitetaan sen prosessin PID
+# joka sen varasi. Jos toinen prosessi yrittää varata jo-varatun paikan,
+# tarkistetaan ELÄÄKÖ tallennettu PID vielä ennen kuin luovutetaan — jos
+# prosessi on kuollut (esim. kaatunut, tapettu, virrankatkos) ilman että
+# ehti vapauttaa paikkansa siististi, paikka vapautetaan automaattisesti
+# eikä jää ikuisesti "haamuvarattuna". Tämä puuttuu tavallisesta noclobber-
+# tiedostolukosta, mutta on tärkeä koska tämä paikka voi pysyä varattuna
+# tuntikausia (koko raidan enkoodauksen ajan).
+#
+# TÄRKEÄÄ (testauksessa löytynyt oikea bugi 2026-08-23): tämän funktion
+# STDOUT ON sen paluuarvokanava (kutsutaan aina muodossa `slot=$(...)`).
+# `log()`-funktio kirjoittaa `tee`:n kautta MYÖS stdoutiin, ei vain
+# lokitiedostoon — jos sitä kutsuttaisiin tässä funktiossa ilman `>&2`,
+# lokiviesti sotkeutuisi paluuarvon sekaan ja kutsuja saisi paikkanumeron
+# sijaan tekstiä. Siksi KAIKKI log()-kutsut tässä funktiossa ohjataan
+# eksplisiittisesti stderr:iin.
+global_slot_try_acquire() {
+    mkdir -p "$GLOBAL_SLOT_DIR"
+    local n; n=$(read_max_parallel)
+    local i
+    for (( i=1; i<=n; i++ )); do
+        local lockpath="${GLOBAL_SLOT_DIR}/slot-${i}.lock"
+        if ( set -o noclobber; echo "$$" > "$lockpath" ) 2>/dev/null; then
+            echo "$i"
+            return 0
+        fi
+        # Paikka näyttää varatulta — tarkista onko sen varannut prosessi yhä elossa.
+        local _owner_pid; _owner_pid=$(cat "$lockpath" 2>/dev/null)
+        if [[ -n "$_owner_pid" ]] && ! kill -0 "$_owner_pid" 2>/dev/null; then
+            log "  VAROITUS: paikka ${i} oli jäänyt varatuksi kuolleelta prosessilta (PID ${_owner_pid}) — vapautetaan" >&2
+            rm -f "$lockpath"
+            if ( set -o noclobber; echo "$$" > "$lockpath" ) 2>/dev/null; then
+                echo "$i"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+global_slot_release() {
+    local slot="$1"
+    rm -f "${GLOBAL_SLOT_DIR}/slot-${slot}.lock"
+}
+
 # Korvaa tiedostojärjestelmissä kiellettyjä merkkejä viivalla.
 # / on kriittisin (rikkoo polurakenteen), mutta SMB-levyllä myös muut merkit ovat kiellettyjä.
 sanitize_name() {
