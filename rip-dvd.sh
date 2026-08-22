@@ -830,6 +830,23 @@ dest_lock_release_all() {
     done
 }
 
+# BLOKKAAVA versio dest_lock_try_acquire:sta — käytetään vain "sooloputki"-
+# tilanteessa: kun kaikki muu tämän session-hakemiston työ on jo tehty eikä
+# rinnakkaisuudesta ole enää mitään hyötyä, on turvallista ja ilmaista vain
+# odottaa siihen asti kunnes toinen session vapauttaa kohdekansion — ei
+# kuluta mitään ylimääräisiä resursseja odottamiseen (`flock` nukkuu ytimessä).
+dest_lock_acquire_blocking() {
+    local dest="$1"
+    [[ -n "${_DEST_LOCK_FDS[$dest]:-}" ]] && return 0
+    local hash lockdir="/tmp/rip-dvd-dest-locks" lockpath fd
+    mkdir -p "$lockdir"
+    hash=$(printf '%s' "$dest" | md5sum | cut -d' ' -f1)
+    lockpath="${lockdir}/${hash}.lock"
+    exec {fd}>"$lockpath"
+    flock "$fd"   # blokkaa kunnes vapautuu
+    _DEST_LOCK_FDS["$dest"]="$fd"
+}
+
 # Korvaa tiedostojärjestelmissä kiellettyjä merkkejä viivalla.
 # / on kriittisin (rikkoo polurakenteen), mutta SMB-levyllä myös muut merkit ovat kiellettyjä.
 sanitize_name() {
@@ -1064,6 +1081,77 @@ encode_session() {
     # funktio päättyy (fd sulkeutuu) — sama periaate kuin alla olevalla
     # globaalilla lukolla.
 
+    # ── Taso B: ekstrojen jonottaminen kun kohdekansio on varattu ───────────
+    # Kirjoittaa levyn ekstrat jonoon VAIN jos kohdekansion varaus onnistuu
+    # (ks. dest_lock_try_acquire yllä). Jos ei onnistu, palauttaa 1 eikä
+    # kirjoita mitään — kutsuja laittaa levyn _PENDING_RETRY-listalle.
+    _enqueue_extras() {
+        local dvd_dir="$1" dest="$2" type="$3" name="$4" season="$5" raw_dir_name="$6" disc_seq="$7"
+        shift 7
+        local -a extra_titles=("$@")
+        (( ${#extra_titles[@]} == 0 )) && return 0
+        if ! dest_lock_try_acquire "$dest"; then
+            return 1
+        fi
+        local _epat _n_tera _n_queue extra_num
+        if [[ "$type" == series ]]; then
+            _epat="${name} S$(printf '%02d' "$season") Extra"
+        else
+            _epat="${name} - Extra"
+        fi
+        _n_tera=$(find "$dest" -maxdepth 1 -name "${_epat} [0-9]*.mkv" 2>/dev/null | wc -l)
+        _n_queue=$(grep -cF "${_epat}" "$queue" 2>/dev/null || true)
+        extra_num=$(( _n_tera + _n_queue + 1 ))
+        local t out_name
+        for t in "${extra_titles[@]}"; do
+            case "$type" in
+            # "-extra"-pääte on Jellyfinin oma ekstratunniste (ks. jellyfin.org/docs/general/server/media/shows).
+            # Ilman sitä Jellyfin tulkitsee numeron jaksonumeroksi ja joko peittää
+            # oikean jakson tai näyttää sen tuplana väärällä nimellä.
+            series) out_name="${name} S$(printf '%02d' "$season") Extra $(printf '%02d' "$extra_num")-extra.mkv" ;;
+            *)      out_name="${name} - Extra $(printf '%02d' "$extra_num")-extra.mkv" ;;
+            esac
+            printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+                "$dvd_dir" "$out_name" "$dest" "$t" "$raw_dir_name" "$disc_seq" >> "$queue"
+            (( extra_num++ )) || true
+        done
+        return 0
+    }
+
+    # Levyt joiden ekstrat jäivät kohdekansion varauksen takia odottamaan —
+    # muoto: dvd_dir\x1fdest\x1ftype\x1fname\x1fseason\x1fraw_dir_name\x1fdisc_seq\x1ftitle1,title2,...
+    # Käyttäjän 2026-08-23 vaatimus: näitä EI hylätä pysyvästi seuraavaan
+    # --encode-only-kierrokseen asti — niitä yritetään uudelleen TÄMÄN SAMAN
+    # ajon aikana (ensin ei-blokkaavasti pääsilmukan pollauskierroksilla
+    # myöhemmin Tasossa C, lopuksi blokkaavasti "sooloputkena" kun mikään muu
+    # ei ole enää kesken).
+    local -a _PENDING_RETRY=()
+
+    # Yrittää uudelleen kaikkia _PENDING_RETRY-listalla olevia leviä.
+    # $1 = 0 (ei-blokkaava, ohita jos yhä varattu) tai 1 (blokkaava, odota).
+    _flush_pending_retry() {
+        local blocking="${1:-0}"
+        (( ${#_PENDING_RETRY[@]} == 0 )) && return 0
+        local -a _still=()
+        local entry
+        for entry in "${_PENDING_RETRY[@]}"; do
+            local dvd_dir dest type name season raw_dir_name disc_seq titles_str
+            IFS=$'\x1f' read -r dvd_dir dest type name season raw_dir_name disc_seq titles_str <<< "$entry"
+            local -a extra_titles=()
+            IFS=',' read -ra extra_titles <<< "$titles_str"
+            if (( blocking )); then
+                dest_lock_acquire_blocking "$dest"
+                _enqueue_extras "$dvd_dir" "$dest" "$type" "$name" "$season" "$raw_dir_name" "$disc_seq" "${extra_titles[@]}"
+                log "  Sooloputki: kohdekansio vapautui — ${#extra_titles[@]} ekstraa (${raw_dir_name}) lisätty jonoon"
+            elif _enqueue_extras "$dvd_dir" "$dest" "$type" "$name" "$season" "$raw_dir_name" "$disc_seq" "${extra_titles[@]}"; then
+                log "  Kohdekansio vapautui — ${#extra_titles[@]} ekstraa (${raw_dir_name}) lisätty jonoon"
+            else
+                _still+=("$entry")
+            fi
+        done
+        _PENDING_RETRY=("${_still[@]}")
+    }
+
     # ── Varmistetaan että vain yksi muunnos on käynnissä kerrallaan ─────────
     # Jos kaksi muunnosta pyörisi yhtä aikaa, tietokone ylikuumenisi (molemmat
     # kuormittaisivat prosessoria täysillä samaan aikaan). Tämä lukitusmekanismi
@@ -1240,47 +1328,29 @@ encode_session() {
             (( i++ )) || true
         done
 
-        # Rakenna jonorivi ekstraraidoille
-        # extra_num lasketaan terastationin olemassa olevista + jo jonossa olevista,
-        # jotta extrat numeroituvat oikein eri sessioiden välillä.
+        # Rakenna jonorivi ekstraraidoille.
         #
         # Taso B -varaus: jos jokin TOINEN käynnissä oleva session on jo
-        # varannut tämän kohdekansion, ekstranumerointi jätetään TÄLLÄ
-        # kierroksella tekemättä (ei lasketa extra_num:ia, ei kirjoiteta
-        # jonoriviä) — muuten kaksi session voisi laskea saman numeron
-        # samasta (vielä päivittämättömästä) tiedostomäärästä. Tämän levyn
-        # ekstrat käsitellään seuraavalla --encode-only-kierroksella kun
-        # kohdekansio on taas vapaa. Ei koske jaksoraitoja (yllä) koska
-        # niillä ei ole juoksevaa numerointia joka voisi törmätä.
-        if (( ${#extra_titles[@]} > 0 )) && ! dest_lock_try_acquire "$dest"; then
-            log "  Kohdekansio varattuna toisen session toimesta — ${#extra_titles[@]} ekstraa (${raw_dir##*/}) käsitellään myöhemmin"
-            extra_titles=()
+        # varannut tämän kohdekansion, tätä levyä EI hylätä — se laitetaan
+        # _PENDING_RETRY-listalle ja sitä yritetään uudelleen TÄMÄN SAMAN
+        # ajon aikana (ks. _flush_pending_retry, kutsutaan pääsilmukan
+        # pollauskierroksilla ja lopuksi blokkaavana "sooloputkena").
+        # Ei koske jaksoraitoja (yllä) koska niillä ei ole juoksevaa
+        # numerointia joka voisi törmätä.
+        if ! _enqueue_extras "$dvd_dir" "$dest" "$type" "$name" "$season" "${raw_dir##*/}" "$disc_seq" "${extra_titles[@]}"; then
+            log "  Kohdekansio varattuna toisen session toimesta — ${#extra_titles[@]} ekstraa (${raw_dir##*/}) jonossa myöhemmäksi"
+            _PENDING_RETRY+=("${dvd_dir}"$'\x1f'"${dest}"$'\x1f'"${type}"$'\x1f'"${name}"$'\x1f'"${season}"$'\x1f'"${raw_dir##*/}"$'\x1f'"${disc_seq}"$'\x1f'"$(IFS=,; echo "${extra_titles[*]}")")
         fi
-        local _epat _n_tera _n_queue extra_num
-        if [[ "$type" == series ]]; then
-            _epat="${name} S$(printf '%02d' "$season") Extra"
-        else
-            _epat="${name} - Extra"
-        fi
-        _n_tera=$(find "$dest" -maxdepth 1 -name "${_epat} [0-9]*.mkv" 2>/dev/null | wc -l)
-        _n_queue=$(grep -cF "${_epat}" "$queue" 2>/dev/null || true)
-        extra_num=$(( _n_tera + _n_queue + 1 ))
-        for t in "${extra_titles[@]}"; do
-            local out_name
-            case "$type" in
-            # "-extra"-pääte on Jellyfinin oma ekstratunniste (ks. jellyfin.org/docs/general/server/media/shows).
-            # Ilman sitä Jellyfin tulkitsee numeron jaksonumeroksi ja joko peittää
-            # oikean jakson tai näyttää sen tuplana väärällä nimellä.
-            series) out_name="${name} S$(printf '%02d' "$season") Extra $(printf '%02d' "$extra_num")-extra.mkv" ;;
-            *)      out_name="${name} - Extra $(printf '%02d' "$extra_num")-extra.mkv" ;;
-            esac
-            printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
-                "$dvd_dir" "$out_name" "$dest" "$t" "${raw_dir##*/}" "$disc_seq" >> "$queue"
-            (( extra_num++ )) || true
-        done
         (( disc_seq++ )) || true
 
     done < <(find "$session_dir" -name "meta.conf" | sort)
+
+    # Yritetään heti yksi ei-blokkaava kierros _PENDING_RETRY-listalle — jos
+    # jokin kohdekansio ehti vapautua kesken tämän levyjen skannauksen,
+    # saadaan sen ekstrat mukaan HETI eikä vasta myöhemmällä pollauksella.
+    # Tehdään ENNEN total_titles-laskentaa, jotta äsken lisätyt rivit
+    # lasketaan mukaan raporttiin.
+    _flush_pending_retry 0
 
     local total_titles; total_titles=$(wc -l < "$queue")
     local total_discs=$(( disc_seq - 1 ))
@@ -1566,6 +1636,15 @@ Jonossa (${_remaining_n}):${_queue_list}${_other_line}"
         fi
 
     done < "$queue"
+
+    # HUOM: _PENDING_RETRY-listan loppuunkäsittely (blokkaava "sooloputki"
+    # niille kohdekansioille jotka eivät koskaan vapautuneet tämän silmukan
+    # aikana) toteutetaan Tason C:n dispatch-silmukan yhteydessä, joka
+    # korvaa tämän synkronisen `while`-silmukan — ei tässä vielä, koska tässä
+    # vaiheessa (yksi enkoodaus kerrallaan globaalisti) _PENDING_RETRY on
+    # todistetusti aina tyhjä: kaksi encode_session()-kutsua ei voi koskaan
+    # olla samaan aikaan jonon rakennusvaiheessa niin kauan kuin globaali
+    # lukko sallii vain yhden kerrallaan koko käsittelyn ajan.
 
     # ── Lähdesiivous: turvaverkko ─────────────────────────────────────────────
     # Normaalitilanteessa _cleanup_disc_if_done() on jo siivonnut levyt yksi kerrallaan.
