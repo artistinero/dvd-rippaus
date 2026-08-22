@@ -1230,25 +1230,46 @@ encode_session() {
         _PENDING_RETRY=("${_still[@]}")
     }
 
-    # ── Varmistetaan että vain yksi muunnos on käynnissä kerrallaan ─────────
-    # Jos kaksi muunnosta pyörisi yhtä aikaa, tietokone ylikuumenisi (molemmat
-    # kuormittaisivat prosessoria täysillä samaan aikaan). Tämä lukitusmekanismi
-    # varmistaa, että toinen istunto odottaa kohteliaasti vuoroaan sen sijaan
-    # että aloittaisi päällekkäin. Aiemmin käytössä ollut yksinkertaisempi
-    # tarkistus ("onko toinen jo käynnissä?") ei ollut täysin luotettava: oli
-    # mahdollista että kaksi istuntoa kysyivät tätä täsmälleen samalla hetkellä
-    # (esim. juuri kun yksi raita vaihtuu toiseen) ja molemmat saivat väärän
-    # vastauksen "ei ole käynnissä" — jolloin molemmat aloittivat yhtä aikaa.
-    # Tässä käytetty tapa (tiedostolukko) ei kärsi tästä ongelmasta lainkaan.
-    exec 9>"$ENCODE_LOCKFILE"
-    if ! flock -n 9; then
-        log "  Enkoodausvuoro jonossa — odotetaan edellisen session valmistumista..."
-        flock 9
-        log "  Lukko saatu — aloitetaan enkoodaus"
+    # ── Taso C: varmistetaan ettei enemmän kuin PARALLEL enkoodausta ole ────
+    # käynnissä SAMANAIKAISESTI KOKO KONEELLA (ei vain tässä session-
+    # hakemistossa — tämä on globaali, kaikkien encode_session()-kutsujen
+    # jakama paikkavaraus).
+    #
+    # HUOM (2026-08-23, tärkeä yksinkertaistus): tämä EI muuta mitään MUUTA
+    # tässä funktiossa. `main()` käynnistää jo valmiiksi jokaiselle levylle
+    # OMAN itsenäisen --encode-only-prosessinsa (todistettu tämän illan
+    # tmux-sessioista) — nämä ovat siis JO ERILLISIÄ käyttöjärjestelmä-
+    # prosesseja, ei saman prosessin sisäisiä säikeitä tai taustatöitä.
+    # Rinnakkaisuus saadaan siis YKSINKERTAISESTI päästämällä useampi näistä
+    # jo olemassa olevista itsenäisistä prosesseista etenemään yhtä aikaa —
+    # jokainen niistä pysyy TÄYSIN ennallaan, käy oman jononsa läpi täsmälleen
+    # samalla synkronisella "yksi raita kerrallaan" -logiikalla kuin ennenkin.
+    # Ei siis tarvita taustaprosesseja, tulostiedostoja eikä minkäänlaista
+    # jaetun tilan (esim. _rep_ok, _src_done) uudelleenrakennusta tämän
+    # funktion SISÄLLÄ — se kaikki toimii jo oikein koska se on aina vain
+    # YHDEN prosessin muistissa, ei koskaan jaettu.
+    #
+    # Vanha yksinkertaisempi tarkistus ("onko toinen jo käynnissä?") ei ollut
+    # täysin luotettava: oli mahdollista että kaksi istuntoa kysyivät tätä
+    # täsmälleen samalla hetkellä ja molemmat saivat väärän vastauksen "ei
+    # ole käynnissä". Paikkavaraustiedosto (noclobber-luonti) ei kärsi tästä.
+    local _my_slot=""
+    if _my_slot=$(global_slot_try_acquire); then
+        log "  Paikka ${_my_slot} saatu — aloitetaan enkoodaus"
+    else
+        log "  Enkoodausvuoro jonossa — odotetaan vapaata paikkaa..."
+        # Ei-blokkaava yritys epäonnistui — jäädään lyhyeen pollaus-
+        # odotukseen. Luetaan PARALLEL-asetus tuoreena JOKA yrityksellä
+        # (ei kerran alussa) jotta asetuksen muuttaminen kesken odotuksen
+        # vaikuttaa heti, ei vasta uudelleenkäynnistyksen jälkeen.
+        while ! _my_slot=$(global_slot_try_acquire); do
+            sleep 5
+        done
+        log "  Paikka ${_my_slot} saatu — aloitetaan enkoodaus"
     fi
-    # Lukko pysyy voimassa koko tämän funktion ajan ja vapautuu automaattisesti
-    # itsestään heti kun funktio päättyy, oli päättyminen sitten normaalia tai
-    # virheen aiheuttamaa — ei vaadi erillistä "vapauta lukko" -komentoa.
+    # Paikka vapautetaan _encode_cleanup()-funktiossa (alempana), joka
+    # ajetaan sekä normaalissa että keskeytyneessä lopetuksessa — sama
+    # periaate kuin dest-lockien vapautuksella.
 
     log "═══ Enkoodausvaihe alkaa ═══"
 
@@ -1261,6 +1282,17 @@ encode_session() {
     # ── Levytilan tarkistus enkoodauksen alussa ──────────��────────────────────
     # Enkoodaus voi kestää tunteja — varmista ennen aloitusta että tilaa riittää.
     # df antaa väärän tuloksen jos terastation ei ole mountattu — varmista ensin.
+    #
+    # HUOM: die() (tässä ja alla) sulkee koko prosessin suoraan `exit`:illä,
+    # ohittaen _encode_cleanup:in — tässä kohtaa jo varattu globaali paikka
+    # (_my_slot) EI siis vapaudu heti. Tämä on tarkoituksella jätetty
+    # yksinkertaiseksi: global_slot_try_acquire:in kuolleen-prosessin-
+    # tunnistus (ks. sen kommentit) korjaa tämän itsestään seuraavalla
+    # yrityksellä — paikka ei siis jää ikuisesti vuotamaan, vain hetkeksi
+    # kunnes joku yrittää sitä seuraavan kerran. Nämä die()-polut ovat
+    # harvinaisia hätätilanteita (terastation kokonaan tavoittamattomissa),
+    # joten viiveellinen mutta itsestään korjautuva vapautus on riittävä
+    # eikä vaadi hauraan cross-scope-siivouslogiikan rakentamista tätä varten.
     wait_for_terastation 600 || die "Terastation ei saatu mountattua 10 minuutin odotuksessa"
     local local_gb tera_gb
     local_gb=$(df "$OUTBASE" | awk 'NR==2 {printf "%d", $4/1024/1024}')
@@ -1433,7 +1465,16 @@ encode_session() {
     local total_titles; total_titles=$(wc -l < "$queue")
     local total_discs=$(( disc_seq - 1 ))
     log "Jonossa $total_titles raitaa / $total_discs levyä enkoodattavana."
-    (( total_titles == 0 )) && { log "Ei enkoodattavaa."; return; }
+    # HUOM: paikka pitää vapauttaa TÄSSÄKIN paluupolussa — _encode_cleanup
+    # (joka normaalisti hoitaa vapautuksen) määritellään vasta myöhemmin
+    # eikä siis vielä ole olemassa jos palataan tästä. Ilman tätä paikka
+    # jäisi vuotamaan aina kun jonossa ei ole mitään enkoodattavaa.
+    if (( total_titles == 0 )); then
+        log "Ei enkoodattavaa."
+        dest_lock_release_all
+        [[ -n "$_my_slot" ]] && global_slot_release "$_my_slot"
+        return
+    fi
 
     # Lasketaan etukäteen montako raitaa kuuluu kullekin alkuperäiselle
     # DVD-kopiolle. Tätä tarvitaan hetken päästä: kun kaikki yhden levyn
@@ -1484,6 +1525,7 @@ encode_session() {
         kill "$tpid" 2>/dev/null || true
         wait "$tpid" 2>/dev/null || true
         dest_lock_release_all
+        [[ -n "$_my_slot" ]] && global_slot_release "$_my_slot"
         trap - INT TERM
     }
     trap "_encode_cleanup; exit 1" INT TERM
