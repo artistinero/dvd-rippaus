@@ -1516,8 +1516,24 @@ encode_session() {
     # tätä siivousta — se pitää ensin herättää tauolta ennen kuin sen voi
     # sulkea siististi.
     _encode_cleanup() {
+        # KRIITTINEN KORJAUS (2026-08-23, löytyi oikeasta rinnakkaistestistä
+        # tuotantodatalla — tappoi vahingossa toisen, täysin erillisen
+        # session/prosessin 24 minuutin työn): `pgrep -x HandBrakeCLI` ILMAN
+        # `-P $$` etsii HandBrakeCLI-prosesseja KOKO KONEELTA, ei vain tämän
+        # prosessin omaa lasta. Tämä oli harmitonta niin kauan kuin vain YKSI
+        # encode_session()-kutsu saattoi koskaan olla käynnissä (vanha 1-
+        # paikkainen lukko) — silloin "mikä tahansa löytyvä HandBrakeCLI" oli
+        # aina oma tai jäänne. Rinnakkaisenkoodauksen (Taso C) myötä tämä ei
+        # enää pidä paikkaansa: koneella voi olla MONTA laillista, eri
+        # session/prosessin HandBrakeCLI:tä yhtä aikaa, ja tämä siivous ajetaan
+        # AINA kun yksikin session lopettaa (myös normaalisti, ei vain Ctrl+C:llä)
+        # — ilman rajausta se tappaisi kaikkien MUIDENKIN vielä kesken olevien
+        # sessioiden enkoodaukset joka kerta kun yksi valmistuu. `-P $$` rajaa
+        # hakuun VAIN tämän prosessin omat suorat lapset (run_hb() käynnistää
+        # HandBrakeCLI:n `&`:lla suoraan tästä samasta prosessista, joten sen
+        # PPID on aina $$) — todennettu oikeasta prosessipuusta ennen korjausta.
         local -a _hb
-        mapfile -t _hb < <(pgrep -x HandBrakeCLI 2>/dev/null)
+        mapfile -t _hb < <(pgrep -x HandBrakeCLI -P $$ 2>/dev/null)
         if (( ${#_hb[@]} > 0 )); then
             kill -CONT "${_hb[@]}" 2>/dev/null || true
             kill -TERM "${_hb[@]}" 2>/dev/null || true
