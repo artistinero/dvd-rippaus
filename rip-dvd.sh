@@ -1245,8 +1245,16 @@ encode_session() {
     # tätä siivousta — se pitää ensin herättää tauolta ennen kuin sen voi
     # sulkea siististi.
     _encode_cleanup() {
+        # KRIITTINEN KORJAUS 2026-08-23: `pgrep -x HandBrakeCLI` ilman `-P $$`
+        # etsii HandBrakeCLI-prosesseja KOKO KONEELTA, ei vain tämän prosessin
+        # omaa lasta. Jos koneella on samaan aikaan useampi rip-dvd.sh-prosessi
+        # käynnissä (esim. manuaalinen rinnakkaisajo), tämä tappaisi TOISENKIN
+        # session enkoodauksen vahingossa aina kun jokin sessio lopettaa —
+        # todistettu oikeasti tapahtuvan testissä, tuhosi 24 min työtä. `-P $$`
+        # rajaa hakuun vain tämän prosessin omat suorat lapset (run_hb()
+        # käynnistää HandBrakeCLI:n suoraan tästä prosessista, PPID on aina $$).
         local -a _hb
-        mapfile -t _hb < <(pgrep -x HandBrakeCLI 2>/dev/null)
+        mapfile -t _hb < <(pgrep -x HandBrakeCLI -P $$ 2>/dev/null)
         if (( ${#_hb[@]} > 0 )); then
             kill -CONT "${_hb[@]}" 2>/dev/null || true
             kill -TERM "${_hb[@]}" 2>/dev/null || true
