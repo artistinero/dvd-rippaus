@@ -783,6 +783,148 @@ dest_path() {
     esac
 }
 
+# ── Rinnakkaisenkoodauksen Taso B: per-kohdekansio-varaus ───────────────────
+# Estää kahta ERI session-hakemistoa laskemasta ekstranumeroita SAMALLE
+# kohdekansiolle yhtä aikaa (mikä voisi johtaa siihen että molemmat päätyvät
+# samaan numeroon, koska molemmat lukisivat saman — vielä päivittämättömän —
+# tiedostomäärän). Käyttäjän 2026-08-23 yksinkertaistus: sen sijaan että
+# numeron laskenta siirrettäisiin monimutkaisesti kirjoitushetkeen asti, koko
+# kyseisen kohdekansion käsittely (numerointi mukaan lukien) vain jätetään
+# tekemättä TÄLLÄ kierroksella jos toinen käynnissä oleva session on jo
+# varannut saman kohdekansion — se käsitellään seuraavalla --encode-only-
+# kierroksella kun kohdekansio on taas vapaa.
+#
+# Yksi varaus pysyy voimassa koko encode_session()-kutsun loppuun asti (ei
+# vapauteta heti numeroinnin jälkeen) — tämä on tarkoituksella varovainen
+# valinta: kun sessio on kerran ottanut kohdekansion "omakseen", se pitää sen
+# loppuun asti eikä anna toisen session vuorotella sen kanssa kesken kaiken.
+declare -A _DEST_LOCK_FDS=()
+
+# Palauttaa 0 (onnistui) jos kohdekansio saatiin varattua, 1 jos joku toinen
+# käynnissä oleva session pitää sitä jo hallussaan. Ei-blokkaava.
+dest_lock_try_acquire() {
+    local dest="$1"
+    [[ -n "${_DEST_LOCK_FDS[$dest]:-}" ]] && return 0  # jo omassa hallussa
+    local hash lockdir="/tmp/rip-dvd-dest-locks" lockpath fd
+    mkdir -p "$lockdir"
+    hash=$(printf '%s' "$dest" | md5sum | cut -d' ' -f1)
+    lockpath="${lockdir}/${hash}.lock"
+    exec {fd}>"$lockpath"
+    if flock -n "$fd"; then
+        _DEST_LOCK_FDS["$dest"]="$fd"
+        return 0
+    else
+        eval "exec ${fd}>&-"
+        return 1
+    fi
+}
+
+# Vapauttaa KAIKKI tämän encode_session()-kutsun hallussa olevat kohdekansio-
+# varaukset. Kutsutaan _encode_cleanup()-funktiosta (ajetaan sekä normaalissa
+# että keskeytyneessä lopetuksessa).
+dest_lock_release_all() {
+    local d
+    for d in "${!_DEST_LOCK_FDS[@]}"; do
+        eval "exec ${_DEST_LOCK_FDS[$d]}>&-"
+        unset '_DEST_LOCK_FDS[$d]'
+    done
+}
+
+# BLOKKAAVA versio dest_lock_try_acquire:sta — käytetään vain "sooloputki"-
+# tilanteessa: kun kaikki muu tämän session-hakemiston työ on jo tehty eikä
+# rinnakkaisuudesta ole enää mitään hyötyä, on turvallista ja ilmaista vain
+# odottaa siihen asti kunnes toinen session vapauttaa kohdekansion — ei
+# kuluta mitään ylimääräisiä resursseja odottamiseen (`flock` nukkuu ytimessä).
+dest_lock_acquire_blocking() {
+    local dest="$1"
+    [[ -n "${_DEST_LOCK_FDS[$dest]:-}" ]] && return 0
+    local hash lockdir="/tmp/rip-dvd-dest-locks" lockpath fd
+    mkdir -p "$lockdir"
+    hash=$(printf '%s' "$dest" | md5sum | cut -d' ' -f1)
+    lockpath="${lockdir}/${hash}.lock"
+    exec {fd}>"$lockpath"
+    flock "$fd"   # blokkaa kunnes vapautuu
+    _DEST_LOCK_FDS["$dest"]="$fd"
+}
+
+# ── Rinnakkaisenkoodauksen Taso C: globaali N-paikkainen semafori ───────────
+# PARALLEL-asetus luetaan TUOREENA config-tiedostosta JOKA KERTA kun paikkaa
+# yritetään varata — EI kerran välimuistiin skriptin käynnistyessä. Tämä on
+# tarkoituksellista: sama virhe kuin tämän illan (2026-08-22) 50°C-tarkistus-
+# bugissa (vanha käynnissä oleva prosessi käytti muistiin ladattua vanhaa
+# arvoa) EI SAA TOISTUA TÄSSÄ. Tuore luku joka kerta tarkoittaa että asetuksen
+# muuttaminen kesken ajon vaikuttaa jo käynnissä olevien encode_session()-
+# kutsujen SEURAAVAAN dispatch-yritykseen ilman uudelleenkäynnistystä.
+RIP_DVD_CONFIG_FILE="${RIP_DVD_CONFIG_FILE:-$HOME/.config/rip-dvd/config}"
+GLOBAL_SLOT_DIR="${GLOBAL_SLOT_DIR:-/tmp/rip-dvd-slots}"
+
+# Ensimmäinen versio (2026-08-23): hyväksyy vain 1 tai 2. Vaikka Tasot A/B/C
+# ovat rakenteeltaan jo N-yleisiä, itse rinnakkaisajoa ei ole testattu yli
+# kahdella tällä raudalla — tiukempi raja on turvallisempi kuin sallia
+# testaamaton alue oletuksena. Nostetaan myöhemmin kun on mitattu.
+read_max_parallel() {
+    local val
+    val=$(grep -m1 '^PARALLEL=' "$RIP_DVD_CONFIG_FILE" 2>/dev/null | cut -d= -f2)
+    if [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 1 && val <= 2 )); then
+        echo "$val"
+    else
+        echo 1   # turvallinen oletus jos tiedostoa/riviä ei ole tai arvo virheellinen
+    fi
+}
+
+# Yrittää saada minkä tahansa vapaan paikan 1..N. Palauttaa saadun paikan
+# numeron stdoutiin ja exit 0, tai exit 1 jos kaikki varattuja. Ei-blokkaava.
+# HUOM: paikan FD EI säily kutsujan hallussa tämän funktion palattua (se on
+# oma paikallinen muuttujansa) — vapautus tehdään tiedoston POISTOLLA
+# (global_slot_release), ei FD:n sulkemisella, koska paikka pitää pystyä
+# vapauttamaan TOISESTA prosessista/aliprosessista kuin joka sen varasi
+# (taustalle haarautunut raidan käsittelijä).
+#
+# Kuolleen prosessin siivous: paikkatiedostoon kirjoitetaan sen prosessin PID
+# joka sen varasi. Jos toinen prosessi yrittää varata jo-varatun paikan,
+# tarkistetaan ELÄÄKÖ tallennettu PID vielä ennen kuin luovutetaan — jos
+# prosessi on kuollut (esim. kaatunut, tapettu, virrankatkos) ilman että
+# ehti vapauttaa paikkansa siististi, paikka vapautetaan automaattisesti
+# eikä jää ikuisesti "haamuvarattuna". Tämä puuttuu tavallisesta noclobber-
+# tiedostolukosta, mutta on tärkeä koska tämä paikka voi pysyä varattuna
+# tuntikausia (koko raidan enkoodauksen ajan).
+#
+# TÄRKEÄÄ (testauksessa löytynyt oikea bugi 2026-08-23): tämän funktion
+# STDOUT ON sen paluuarvokanava (kutsutaan aina muodossa `slot=$(...)`).
+# `log()`-funktio kirjoittaa `tee`:n kautta MYÖS stdoutiin, ei vain
+# lokitiedostoon — jos sitä kutsuttaisiin tässä funktiossa ilman `>&2`,
+# lokiviesti sotkeutuisi paluuarvon sekaan ja kutsuja saisi paikkanumeron
+# sijaan tekstiä. Siksi KAIKKI log()-kutsut tässä funktiossa ohjataan
+# eksplisiittisesti stderr:iin.
+global_slot_try_acquire() {
+    mkdir -p "$GLOBAL_SLOT_DIR"
+    local n; n=$(read_max_parallel)
+    local i
+    for (( i=1; i<=n; i++ )); do
+        local lockpath="${GLOBAL_SLOT_DIR}/slot-${i}.lock"
+        if ( set -o noclobber; echo "$$" > "$lockpath" ) 2>/dev/null; then
+            echo "$i"
+            return 0
+        fi
+        # Paikka näyttää varatulta — tarkista onko sen varannut prosessi yhä elossa.
+        local _owner_pid; _owner_pid=$(cat "$lockpath" 2>/dev/null)
+        if [[ -n "$_owner_pid" ]] && ! kill -0 "$_owner_pid" 2>/dev/null; then
+            log "  VAROITUS: paikka ${i} oli jäänyt varatuksi kuolleelta prosessilta (PID ${_owner_pid}) — vapautetaan" >&2
+            rm -f "$lockpath"
+            if ( set -o noclobber; echo "$$" > "$lockpath" ) 2>/dev/null; then
+                echo "$i"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+global_slot_release() {
+    local slot="$1"
+    rm -f "${GLOBAL_SLOT_DIR}/slot-${slot}.lock"
+}
+
 # Korvaa tiedostojärjestelmissä kiellettyjä merkkejä viivalla.
 # / on kriittisin (rikkoo polurakenteen), mutta SMB-levyllä myös muut merkit ovat kiellettyjä.
 sanitize_name() {
@@ -995,25 +1137,139 @@ _other_sessions_pending() {
 encode_session() {
     local session_dir="$1"
 
-    # ── Varmistetaan että vain yksi muunnos on käynnissä kerrallaan ─────────
-    # Jos kaksi muunnosta pyörisi yhtä aikaa, tietokone ylikuumenisi (molemmat
-    # kuormittaisivat prosessoria täysillä samaan aikaan). Tämä lukitusmekanismi
-    # varmistaa, että toinen istunto odottaa kohteliaasti vuoroaan sen sijaan
-    # että aloittaisi päällekkäin. Aiemmin käytössä ollut yksinkertaisempi
-    # tarkistus ("onko toinen jo käynnissä?") ei ollut täysin luotettava: oli
-    # mahdollista että kaksi istuntoa kysyivät tätä täsmälleen samalla hetkellä
-    # (esim. juuri kun yksi raita vaihtuu toiseen) ja molemmat saivat väärän
-    # vastauksen "ei ole käynnissä" — jolloin molemmat aloittivat yhtä aikaa.
-    # Tässä käytetty tapa (tiedostolukko) ei kärsi tästä ongelmasta lainkaan.
-    exec 9>"$ENCODE_LOCKFILE"
-    if ! flock -n 9; then
-        log "  Enkoodausvuoro jonossa — odotetaan edellisen session valmistumista..."
-        flock 9
-        log "  Lukko saatu — aloitetaan enkoodaus"
+    # ── Taso A: per-session-hakemisto-lukko (rinnakkaisenkoodauksen 1. vaihe) ──
+    # Suojaa TÄMÄN session-hakemiston jaettuja tiedostoja (.queue, .encode-report,
+    # .skip-titles) siltä että kaksi ERI --encode-only-kutsua käsittelisi samaa
+    # session-hakemistoa yhtä aikaa. Tämä on todistetusti yleinen tilanne tässä
+    # projektissa: main() käynnistää oman --encode-only-kutsunsa JOKAISEN ripatun
+    # levyn jälkeen samalle session-hakemistolle, joten monta kutsua saman
+    # session-hakemiston käsittelyyn on tavallista, ei harvinainen reunatapaus.
+    #
+    # Tämä lukko on TÄYSIN itsenäinen alla olevasta globaalista ENCODE_LOCKFILE-
+    # lukosta eikä riipu siitä millään tavalla — ei siis deadlock-riskiä eri
+    # session-hakemistojen välillä, koska niillä on aina eri lukkotiedosto.
+    local session_lock_fd
+    exec {session_lock_fd}>"${session_dir}/.encode.lock"
+    if ! flock -n "$session_lock_fd"; then
+        log "  Toinen käsittelijä on jo aktiivinen tälle session-hakemistolle — odotetaan..."
+        flock "$session_lock_fd"
+        log "  Session-lukko saatu"
     fi
-    # Lukko pysyy voimassa koko tämän funktion ajan ja vapautuu automaattisesti
-    # itsestään heti kun funktio päättyy, oli päättyminen sitten normaalia tai
-    # virheen aiheuttamaa — ei vaadi erillistä "vapauta lukko" -komentoa.
+    # Lukko pysyy voimassa koko funktion ajan, vapautuu automaattisesti kun
+    # funktio päättyy (fd sulkeutuu) — sama periaate kuin alla olevalla
+    # globaalilla lukolla.
+
+    # ── Taso B: ekstrojen jonottaminen kun kohdekansio on varattu ───────────
+    # Kirjoittaa levyn ekstrat jonoon VAIN jos kohdekansion varaus onnistuu
+    # (ks. dest_lock_try_acquire yllä). Jos ei onnistu, palauttaa 1 eikä
+    # kirjoita mitään — kutsuja laittaa levyn _PENDING_RETRY-listalle.
+    _enqueue_extras() {
+        local dvd_dir="$1" dest="$2" type="$3" name="$4" season="$5" raw_dir_name="$6" disc_seq="$7"
+        shift 7
+        local -a extra_titles=("$@")
+        (( ${#extra_titles[@]} == 0 )) && return 0
+        if ! dest_lock_try_acquire "$dest"; then
+            return 1
+        fi
+        local _epat _n_tera _n_queue extra_num
+        if [[ "$type" == series ]]; then
+            _epat="${name} S$(printf '%02d' "$season") Extra"
+        else
+            _epat="${name} - Extra"
+        fi
+        _n_tera=$(find "$dest" -maxdepth 1 -name "${_epat} [0-9]*.mkv" 2>/dev/null | wc -l)
+        _n_queue=$(grep -cF "${_epat}" "$queue" 2>/dev/null || true)
+        extra_num=$(( _n_tera + _n_queue + 1 ))
+        local t out_name
+        for t in "${extra_titles[@]}"; do
+            case "$type" in
+            # "-extra"-pääte on Jellyfinin oma ekstratunniste (ks. jellyfin.org/docs/general/server/media/shows).
+            # Ilman sitä Jellyfin tulkitsee numeron jaksonumeroksi ja joko peittää
+            # oikean jakson tai näyttää sen tuplana väärällä nimellä.
+            series) out_name="${name} S$(printf '%02d' "$season") Extra $(printf '%02d' "$extra_num")-extra.mkv" ;;
+            *)      out_name="${name} - Extra $(printf '%02d' "$extra_num")-extra.mkv" ;;
+            esac
+            printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+                "$dvd_dir" "$out_name" "$dest" "$t" "$raw_dir_name" "$disc_seq" >> "$queue"
+            (( extra_num++ )) || true
+        done
+        return 0
+    }
+
+    # Levyt joiden ekstrat jäivät kohdekansion varauksen takia odottamaan —
+    # muoto: dvd_dir\x1fdest\x1ftype\x1fname\x1fseason\x1fraw_dir_name\x1fdisc_seq\x1ftitle1,title2,...
+    # Käyttäjän 2026-08-23 vaatimus: näitä EI hylätä pysyvästi seuraavaan
+    # --encode-only-kierrokseen asti — niitä yritetään uudelleen TÄMÄN SAMAN
+    # ajon aikana (ensin ei-blokkaavasti pääsilmukan pollauskierroksilla
+    # myöhemmin Tasossa C, lopuksi blokkaavasti "sooloputkena" kun mikään muu
+    # ei ole enää kesken).
+    local -a _PENDING_RETRY=()
+
+    # Yrittää uudelleen kaikkia _PENDING_RETRY-listalla olevia leviä.
+    # $1 = 0 (ei-blokkaava, ohita jos yhä varattu) tai 1 (blokkaava, odota).
+    _flush_pending_retry() {
+        local blocking="${1:-0}"
+        (( ${#_PENDING_RETRY[@]} == 0 )) && return 0
+        local -a _still=()
+        local entry
+        for entry in "${_PENDING_RETRY[@]}"; do
+            local dvd_dir dest type name season raw_dir_name disc_seq titles_str
+            IFS=$'\x1f' read -r dvd_dir dest type name season raw_dir_name disc_seq titles_str <<< "$entry"
+            local -a extra_titles=()
+            IFS=',' read -ra extra_titles <<< "$titles_str"
+            if (( blocking )); then
+                dest_lock_acquire_blocking "$dest"
+                _enqueue_extras "$dvd_dir" "$dest" "$type" "$name" "$season" "$raw_dir_name" "$disc_seq" "${extra_titles[@]}"
+                log "  Sooloputki: kohdekansio vapautui — ${#extra_titles[@]} ekstraa (${raw_dir_name}) lisätty jonoon"
+            elif _enqueue_extras "$dvd_dir" "$dest" "$type" "$name" "$season" "$raw_dir_name" "$disc_seq" "${extra_titles[@]}"; then
+                log "  Kohdekansio vapautui — ${#extra_titles[@]} ekstraa (${raw_dir_name}) lisätty jonoon"
+            else
+                _still+=("$entry")
+            fi
+        done
+        _PENDING_RETRY=("${_still[@]}")
+    }
+
+    # ── Taso C: varmistetaan ettei enemmän kuin PARALLEL enkoodausta ole ────
+    # käynnissä SAMANAIKAISESTI KOKO KONEELLA (ei vain tässä session-
+    # hakemistossa — tämä on globaali, kaikkien encode_session()-kutsujen
+    # jakama paikkavaraus).
+    #
+    # HUOM (2026-08-23, tärkeä yksinkertaistus): tämä EI muuta mitään MUUTA
+    # tässä funktiossa. `main()` käynnistää jo valmiiksi jokaiselle levylle
+    # OMAN itsenäisen --encode-only-prosessinsa (todistettu tämän illan
+    # tmux-sessioista) — nämä ovat siis JO ERILLISIÄ käyttöjärjestelmä-
+    # prosesseja, ei saman prosessin sisäisiä säikeitä tai taustatöitä.
+    # Rinnakkaisuus saadaan siis YKSINKERTAISESTI päästämällä useampi näistä
+    # jo olemassa olevista itsenäisistä prosesseista etenemään yhtä aikaa —
+    # jokainen niistä pysyy TÄYSIN ennallaan, käy oman jononsa läpi täsmälleen
+    # samalla synkronisella "yksi raita kerrallaan" -logiikalla kuin ennenkin.
+    # Ei siis tarvita taustaprosesseja, tulostiedostoja eikä minkäänlaista
+    # jaetun tilan (esim. _rep_ok, _src_done) uudelleenrakennusta tämän
+    # funktion SISÄLLÄ — se kaikki toimii jo oikein koska se on aina vain
+    # YHDEN prosessin muistissa, ei koskaan jaettu.
+    #
+    # Vanha yksinkertaisempi tarkistus ("onko toinen jo käynnissä?") ei ollut
+    # täysin luotettava: oli mahdollista että kaksi istuntoa kysyivät tätä
+    # täsmälleen samalla hetkellä ja molemmat saivat väärän vastauksen "ei
+    # ole käynnissä". Paikkavaraustiedosto (noclobber-luonti) ei kärsi tästä.
+    local _my_slot=""
+    if _my_slot=$(global_slot_try_acquire); then
+        log "  Paikka ${_my_slot} saatu — aloitetaan enkoodaus"
+    else
+        log "  Enkoodausvuoro jonossa — odotetaan vapaata paikkaa..."
+        # Ei-blokkaava yritys epäonnistui — jäädään lyhyeen pollaus-
+        # odotukseen. Luetaan PARALLEL-asetus tuoreena JOKA yrityksellä
+        # (ei kerran alussa) jotta asetuksen muuttaminen kesken odotuksen
+        # vaikuttaa heti, ei vasta uudelleenkäynnistyksen jälkeen.
+        while ! _my_slot=$(global_slot_try_acquire); do
+            sleep 5
+        done
+        log "  Paikka ${_my_slot} saatu — aloitetaan enkoodaus"
+    fi
+    # Paikka vapautetaan _encode_cleanup()-funktiossa (alempana), joka
+    # ajetaan sekä normaalissa että keskeytyneessä lopetuksessa — sama
+    # periaate kuin dest-lockien vapautuksella.
 
     log "═══ Enkoodausvaihe alkaa ═══"
 
@@ -1026,6 +1282,17 @@ encode_session() {
     # ── Levytilan tarkistus enkoodauksen alussa ──────────��────────────────────
     # Enkoodaus voi kestää tunteja — varmista ennen aloitusta että tilaa riittää.
     # df antaa väärän tuloksen jos terastation ei ole mountattu — varmista ensin.
+    #
+    # HUOM: die() (tässä ja alla) sulkee koko prosessin suoraan `exit`:illä,
+    # ohittaen _encode_cleanup:in — tässä kohtaa jo varattu globaali paikka
+    # (_my_slot) EI siis vapaudu heti. Tämä on tarkoituksella jätetty
+    # yksinkertaiseksi: global_slot_try_acquire:in kuolleen-prosessin-
+    # tunnistus (ks. sen kommentit) korjaa tämän itsestään seuraavalla
+    # yrityksellä — paikka ei siis jää ikuisesti vuotamaan, vain hetkeksi
+    # kunnes joku yrittää sitä seuraavan kerran. Nämä die()-polut ovat
+    # harvinaisia hätätilanteita (terastation kokonaan tavoittamattomissa),
+    # joten viiveellinen mutta itsestään korjautuva vapautus on riittävä
+    # eikä vaadi hauraan cross-scope-siivouslogiikan rakentamista tätä varten.
     wait_for_terastation 600 || die "Terastation ei saatu mountattua 10 minuutin odotuksessa"
     local local_gb tera_gb
     local_gb=$(df "$OUTBASE" | awk 'NR==2 {printf "%d", $4/1024/1024}')
@@ -1171,39 +1438,43 @@ encode_session() {
             (( i++ )) || true
         done
 
-        # Rakenna jonorivi ekstraraidoille
-        # extra_num lasketaan terastationin olemassa olevista + jo jonossa olevista,
-        # jotta extrat numeroituvat oikein eri sessioiden välillä.
-        local _epat _n_tera _n_queue extra_num
-        if [[ "$type" == series ]]; then
-            _epat="${name} S$(printf '%02d' "$season") Extra"
-        else
-            _epat="${name} - Extra"
+        # Rakenna jonorivi ekstraraidoille.
+        #
+        # Taso B -varaus: jos jokin TOINEN käynnissä oleva session on jo
+        # varannut tämän kohdekansion, tätä levyä EI hylätä — se laitetaan
+        # _PENDING_RETRY-listalle ja sitä yritetään uudelleen TÄMÄN SAMAN
+        # ajon aikana (ks. _flush_pending_retry, kutsutaan pääsilmukan
+        # pollauskierroksilla ja lopuksi blokkaavana "sooloputkena").
+        # Ei koske jaksoraitoja (yllä) koska niillä ei ole juoksevaa
+        # numerointia joka voisi törmätä.
+        if ! _enqueue_extras "$dvd_dir" "$dest" "$type" "$name" "$season" "${raw_dir##*/}" "$disc_seq" "${extra_titles[@]}"; then
+            log "  Kohdekansio varattuna toisen session toimesta — ${#extra_titles[@]} ekstraa (${raw_dir##*/}) jonossa myöhemmäksi"
+            _PENDING_RETRY+=("${dvd_dir}"$'\x1f'"${dest}"$'\x1f'"${type}"$'\x1f'"${name}"$'\x1f'"${season}"$'\x1f'"${raw_dir##*/}"$'\x1f'"${disc_seq}"$'\x1f'"$(IFS=,; echo "${extra_titles[*]}")")
         fi
-        _n_tera=$(find "$dest" -maxdepth 1 -name "${_epat} [0-9]*.mkv" 2>/dev/null | wc -l)
-        _n_queue=$(grep -cF "${_epat}" "$queue" 2>/dev/null || true)
-        extra_num=$(( _n_tera + _n_queue + 1 ))
-        for t in "${extra_titles[@]}"; do
-            local out_name
-            case "$type" in
-            # "-extra"-pääte on Jellyfinin oma ekstratunniste (ks. jellyfin.org/docs/general/server/media/shows).
-            # Ilman sitä Jellyfin tulkitsee numeron jaksonumeroksi ja joko peittää
-            # oikean jakson tai näyttää sen tuplana väärällä nimellä.
-            series) out_name="${name} S$(printf '%02d' "$season") Extra $(printf '%02d' "$extra_num")-extra.mkv" ;;
-            *)      out_name="${name} - Extra $(printf '%02d' "$extra_num")-extra.mkv" ;;
-            esac
-            printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
-                "$dvd_dir" "$out_name" "$dest" "$t" "${raw_dir##*/}" "$disc_seq" >> "$queue"
-            (( extra_num++ )) || true
-        done
         (( disc_seq++ )) || true
 
     done < <(find "$session_dir" -name "meta.conf" | sort)
 
+    # Yritetään heti yksi ei-blokkaava kierros _PENDING_RETRY-listalle — jos
+    # jokin kohdekansio ehti vapautua kesken tämän levyjen skannauksen,
+    # saadaan sen ekstrat mukaan HETI eikä vasta myöhemmällä pollauksella.
+    # Tehdään ENNEN total_titles-laskentaa, jotta äsken lisätyt rivit
+    # lasketaan mukaan raporttiin.
+    _flush_pending_retry 0
+
     local total_titles; total_titles=$(wc -l < "$queue")
     local total_discs=$(( disc_seq - 1 ))
     log "Jonossa $total_titles raitaa / $total_discs levyä enkoodattavana."
-    (( total_titles == 0 )) && { log "Ei enkoodattavaa."; return; }
+    # HUOM: paikka pitää vapauttaa TÄSSÄKIN paluupolussa — _encode_cleanup
+    # (joka normaalisti hoitaa vapautuksen) määritellään vasta myöhemmin
+    # eikä siis vielä ole olemassa jos palataan tästä. Ilman tätä paikka
+    # jäisi vuotamaan aina kun jonossa ei ole mitään enkoodattavaa.
+    if (( total_titles == 0 )); then
+        log "Ei enkoodattavaa."
+        dest_lock_release_all
+        [[ -n "$_my_slot" ]] && global_slot_release "$_my_slot"
+        return
+    fi
 
     # Lasketaan etukäteen montako raitaa kuuluu kullekin alkuperäiselle
     # DVD-kopiolle. Tätä tarvitaan hetken päästä: kun kaikki yhden levyn
@@ -1245,14 +1516,22 @@ encode_session() {
     # tätä siivousta — se pitää ensin herättää tauolta ennen kuin sen voi
     # sulkea siististi.
     _encode_cleanup() {
-        # KRIITTINEN KORJAUS 2026-08-23: `pgrep -x HandBrakeCLI` ilman `-P $$`
-        # etsii HandBrakeCLI-prosesseja KOKO KONEELTA, ei vain tämän prosessin
-        # omaa lasta. Jos koneella on samaan aikaan useampi rip-dvd.sh-prosessi
-        # käynnissä (esim. manuaalinen rinnakkaisajo), tämä tappaisi TOISENKIN
-        # session enkoodauksen vahingossa aina kun jokin sessio lopettaa —
-        # todistettu oikeasti tapahtuvan testissä, tuhosi 24 min työtä. `-P $$`
-        # rajaa hakuun vain tämän prosessin omat suorat lapset (run_hb()
-        # käynnistää HandBrakeCLI:n suoraan tästä prosessista, PPID on aina $$).
+        # KRIITTINEN KORJAUS (2026-08-23, löytyi oikeasta rinnakkaistestistä
+        # tuotantodatalla — tappoi vahingossa toisen, täysin erillisen
+        # session/prosessin 24 minuutin työn): `pgrep -x HandBrakeCLI` ILMAN
+        # `-P $$` etsii HandBrakeCLI-prosesseja KOKO KONEELTA, ei vain tämän
+        # prosessin omaa lasta. Tämä oli harmitonta niin kauan kuin vain YKSI
+        # encode_session()-kutsu saattoi koskaan olla käynnissä (vanha 1-
+        # paikkainen lukko) — silloin "mikä tahansa löytyvä HandBrakeCLI" oli
+        # aina oma tai jäänne. Rinnakkaisenkoodauksen (Taso C) myötä tämä ei
+        # enää pidä paikkaansa: koneella voi olla MONTA laillista, eri
+        # session/prosessin HandBrakeCLI:tä yhtä aikaa, ja tämä siivous ajetaan
+        # AINA kun yksikin session lopettaa (myös normaalisti, ei vain Ctrl+C:llä)
+        # — ilman rajausta se tappaisi kaikkien MUIDENKIN vielä kesken olevien
+        # sessioiden enkoodaukset joka kerta kun yksi valmistuu. `-P $$` rajaa
+        # hakuun VAIN tämän prosessin omat suorat lapset (run_hb() käynnistää
+        # HandBrakeCLI:n `&`:lla suoraan tästä samasta prosessista, joten sen
+        # PPID on aina $$) — todennettu oikeasta prosessipuusta ennen korjausta.
         local -a _hb
         mapfile -t _hb < <(pgrep -x HandBrakeCLI -P $$ 2>/dev/null)
         if (( ${#_hb[@]} > 0 )); then
@@ -1261,6 +1540,8 @@ encode_session() {
         fi
         kill "$tpid" 2>/dev/null || true
         wait "$tpid" 2>/dev/null || true
+        dest_lock_release_all
+        [[ -n "$_my_slot" ]] && global_slot_release "$_my_slot"
         trap - INT TERM
     }
     trap "_encode_cleanup; exit 1" INT TERM
@@ -1491,6 +1772,54 @@ Jonossa (${_remaining_n}):${_queue_list}${_other_line}"
         fi
 
     done < "$queue"
+
+    # "Sooloputki": jos jokin ekstra jäi vielä _PENDING_RETRY-listalle (Taso B
+    # skippasi sen koska sen kohdekansio oli toisen SAMAAN AIKAAN käynnissä
+    # olevan itsenäisen --encode-only-prosessin käytössä — tämä on nyt
+    # mahdollista Tason C:n myötä, kun useampi prosessi voi olla globaalin
+    # semaforin sisällä yhtä aikaa), odotetaan BLOKKAAVASTI kunnes se toinen
+    # prosessi vapauttaa kohdekansion, ja käsitellään loput ylimääräisenä
+    # kierroksena. `_flush_pending_retry 1` (blokkaava) EI PALAA ennen kuin
+    # KAIKKI listalla olevat on ratkaistu ja lisätty jonoon.
+    #
+    # Käsitellään VAIN äsken lisätyt UUDET rivit (`tail -n +$((_lines_before+1))`),
+    # ei koko jonoa uudelleen alusta — muuten jo EPÄONNISTUNEET rivit
+    # yritettäisiin uudelleen pyytämättä ja kirjautuisivat _rep_fail-listalle
+    # kahdesti. Jo ONNISTUNEET rivit eivät tästä kärsisi (Tarkistus 1 estäisi
+    # tuplaenkoodauksen), mutta epäonnistuneet kärsisivät — siksi tarkka rajaus.
+    if (( ${#_PENDING_RETRY[@]} > 0 )); then
+        log "  Odotetaan ${#_PENDING_RETRY[@]} levyn ekstrojen kohdekansion vapautumista (sooloputki)..."
+        local _lines_before; _lines_before=$(wc -l < "$queue")
+        _flush_pending_retry 1
+        local _new_lines; _new_lines=$(( $(wc -l < "$queue") - _lines_before ))
+        total_titles=$(( total_titles + _new_lines ))
+        while IFS=$'\x1f' read -r src out_name dest title_num disc_label disc_n; do
+            (( done_n++ )) || true
+            if _title_is_skipped "$session_dir" "$out_name"; then
+                log "  Ohitetaan pysyvästi (merkitty luovutuksi --skipillä): ${out_name}"
+                (( _rep_skip++ )) || true
+                continue
+            fi
+            log "Enkoodataan (sooloputki, $done_n/$total_titles): ${out_name} [${disc_label}]"
+            local out="${enc_dir}/${out_name%.mkv}.tmp.mkv"
+            mkdir -p "$dest" 2>/dev/null || true
+            run_hb "$src" "$out" "$title_num" "$out_name"
+            local rc=$?
+            local out_sz_bytes; out_sz_bytes=$(stat -c%s "$out" 2>/dev/null || echo 0)
+            if (( rc == 0 )) && (( out_sz_bytes > 1048576 )); then
+                local final="${enc_dir}/${out_name}"
+                mv "$out" "$final" && mv "$final" "${dest}/" && {
+                    log "  ✓ ${out_name} [sooloputki]"
+                    (( _rep_ok++ )) || true
+                    _cleanup_disc_if_done "$src"
+                }
+            else
+                rm -f "$out"
+                log "  VIRHE: enkoodaus epäonnistui sooloputkessa — ${out_name} (rc=${rc})"
+                _rep_fail+=("${out_name}|rc=${rc} (sooloputki)")
+            fi
+        done < <(tail -n "+$((_lines_before + 1))" "$queue")
+    fi
 
     # ── Lähdesiivous: turvaverkko ─────────────────────────────────────────────
     # Normaalitilanteessa _cleanup_disc_if_done() on jo siivonnut levyt yksi kerrallaan.
