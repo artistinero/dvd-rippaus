@@ -858,14 +858,15 @@ dest_lock_acquire_blocking() {
 RIP_DVD_CONFIG_FILE="${RIP_DVD_CONFIG_FILE:-$HOME/.config/rip-dvd/config}"
 GLOBAL_SLOT_DIR="${GLOBAL_SLOT_DIR:-/tmp/rip-dvd-slots}"
 
-# Ensimmäinen versio (2026-08-23): hyväksyy vain 1 tai 2. Vaikka Tasot A/B/C
-# ovat rakenteeltaan jo N-yleisiä, itse rinnakkaisajoa ei ole testattu yli
-# kahdella tällä raudalla — tiukempi raja on turvallisempi kuin sallia
-# testaamaton alue oletuksena. Nostetaan myöhemmin kun on mitattu.
+# Raja nostettu 2:sta 3:een 2026-08-23 sen jälkeen kun 2 osoittautui vakaaksi
+# tuotannossa (useita tunteja, ei kaatumisia, ei duplikaatteja) JA Taso C:n
+# N=3-tapaus oli jo aiemmin testattu eristetysti. Raudalla on 4 fyysistä
+# ydintä — hyöty 2:sta 3:een voi olla pienempi kuin 1:stä 2:een, koska
+# ydinten rajallisuus alkaa rajoittaa, mutta ei ole vielä mitattu oikeasti.
 read_max_parallel() {
     local val
     val=$(grep -m1 '^PARALLEL=' "$RIP_DVD_CONFIG_FILE" 2>/dev/null | cut -d= -f2)
-    if [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 1 && val <= 2 )); then
+    if [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 1 && val <= 3 )); then
         echo "$val"
     else
         echo 1   # turvallinen oletus jos tiedostoa/riviä ei ole tai arvo virheellinen
