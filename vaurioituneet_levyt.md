@@ -91,3 +91,14 @@ luovuttaminen, ellei parempaa CSS-yhteensopivaa palautustyökalua löydy.
   koska tuotantoskriptin muuttaminen valvomatta yön yli olisi riski.
 - Levytilavaatimus: koko levyn raakakuva (n. 4,7-8,5GB single/dual-layer) — varmista tilaa ennen
   käyttöä `df -h /home/keitsi/dvd-rip-tmp`.
+
+## HANKALAT LEVYT (navigointirakenne jumittaa lukutyökalut, ei fyysinen vaurio)
+
+- **Being John Malkovich (1999)** — lisätty 2026-08-25. Levy jumittaa SEKÄ ffmpeg dvdvideo-demukserin
+  ETTÄ dvdbackupin heti alkuun (0 tavua/0 edistyminen), ja lukitsee optisen aseman joka yrityksellä
+  (vaatii kelkan avaus/sulku). dmesg PUHDAS (ei critical medium error / I/O error) → EI fyysinen
+  levyvaurio vaan levyn looginen navigointirakenne (IFO/PGC) jota libdvdread/libdvdnav looppaa.
+  Kokeiltu 2× dvdvideo suoraan + 2× dvdbackup -t 1 → kaikki jumittuivat. Kirjaston tekstitys yhä
+  KORJAAMATON (Part 01 = 108min desync, 8 raitaa; ekstrat Part02/03/04 jo nimetty Extra 01/02/03).
+  **Kokeiltavat jatkotavat:** eri optinen asema, levyn puhdistus, tai ro-mount + suora VOB-kopiointi
+  (ohittaa libdvdread-navigoinnin). Ei ratkaistu.
