@@ -52,6 +52,15 @@ tämä on hitaampi ja monimutkaisempi reitti, ei oletustapa. Sopii erityisesti:
   -merkintöjä sektoreilla n. 809960, 815528, 101941-101943 (klo 21:54-21:55). Koko keskeneräinen
   data siivottiin automaattisesti pois epäonnistumisen jälkeen (ei jäänyt mitään talteen) —
   vaatii levyn uudelleen asemaan ja täyden `ddrescue`-yrityksen tästä alusta.
+  - **PÄIVITYS 2026-08-24: molemmat kirjastoon jääneet enkoodausversiot OVAT PIELESSÄ, käyttäjä
+    vahvisti katsomalla.** Kirjastossa `Asterix and the Vikings - 69min.mkv` ja `- 82min.mkv`
+    (kaksi ehdokas-titteliä title 1 vs title 25, säilytetty vertailua varten 2026-08-22). Käyttäjä
+    2026-08-24: molemmat sekaisin kaikin tavoin, **kohtausten järjestys menee miten sattuu**, ja
+    versiot ovat jotenkin sekaisin keskenään. Tämä sopii levyn viallliseen/sekaisin olevaan
+    titteli/PGC-rakenteeseen ("96 titteliä" -ilmiö) → mikä tahansa lineaarinen enkoodaus saa
+    solut/kohtaukset väärään järjestykseen. **EI korjattavissa tekstitysmenetelmällä eikä
+    uudelleenenkoodauksella samasta rakenteesta — kyse on lähdelevyn rakenteen vauriosta.**
+    Molemmat versiot ovat käyttökelvottomia. Ratkaisu: toinen fyysinen kappale, tai luovutus.
 - Muut tulevat samantyyppiset tapaukset
 
 ## LÖYDETTY VAKAVA RAJOITUS 2026-08-22: ddrescue ei toimi salatuille DVD-levyille sellaisenaan
