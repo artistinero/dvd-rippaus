@@ -35,8 +35,16 @@ Sitten remux: `mkvmerge -o final.mkv --no-subtitles kirjasto.mkv ulos.mkv` (vide
 2. **Irrota kaikki tekstitykset suoraan levyltä** (ei dvdbackuppia — libdvdcss purkaa CSS:n lennossa):
    `/opt/ffmpeg-dvdvideo/bin/ffmpeg -y -f dvdvideo -title N -i /dev/sr1 -map 0:s -c:s copy ulos.mkv`
    → kaikki raidat, kielitunnisteet ja paletit automaattisesti, NAV-ajastus oikein.
+2b. **PAKOLLINEN: lisää `size: 720x576` -rivi jokaisen raidan idx-otsikkoon** (validoitu 2026-08-24,
+   Big Lebowski). dvdvideo PUDOTTAA size-rivin, ja ILMAN SITÄ tekstit eivät näy soittimessa
+   RAJATUILLA videoilla (esim. laajakuvaelokuvat 718x416): teksti on 576-ruudulle aseteltu, ja
+   `size`-rivi kertoo VLC:lle skaalata sen rajattuun kuvaan. Ilman: putoaa kuvan ulkopuolelle.
+   Tapa: `mkvextract` raidat idx/sub:iksi → lisää HandBrake-tyylinen otsikko (size:720x576 + org/
+   scale/alpha/... palettirivin eteen) jokaiseen idx:ään → `mkvmerge`. Vertailtu toimivaan
+   HandBrake-versioon: ero oli PELKKÄ tämä otsikko. (Barfly toimi ilman koska rajaus oli minimaalinen.)
 3. **Varmista tulos** — `ffprobe` ulos.mkv: raitamäärä järkevä + kielet oikein + ajastus järkevä
-   (ensimmäinen tekstitys EI ajassa 0.000, viimeinen lähellä elokuvan loppua). Ellei → PYSÄHDY.
+   (ensimmäinen tekstitys EI ajassa 0.000). JA renderöi yksi tekstityskuva TODELLISELLE videon
+   koolle (esim. 718x416) — jos teksti putoaa ulos, size-rivi puuttuu/väärä. Ellei kunnossa → PYSÄHDY.
 4. **Remux kirjaston tiedostoon** — `mkvmerge -o final.mkv --no-subtitles kirjasto.mkv ulos.mkv`
    (video/ääni koskematta; kielet tulevat ulos.mkv:stä valmiina).
 5. **Verifioi + korvaa atomisesti** — final.mkv: N raitaa, oikeat kielet, kesto ennallaan. Kopioi
