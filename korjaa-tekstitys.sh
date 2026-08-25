@@ -163,20 +163,24 @@ fi
 NSUB=$(ffprobe -v error -select_streams s -show_entries stream=index -of csv=p=0 subs.mkv 2>/dev/null | wc -l)
 log "Irrotettu $NSUB tekstitysraitaa."
 
-# SISÄLLÖN TARKISTUS: laske suurin tekstityspakettimäärä raitojen yli. Jos KAIKKI raidat ovat
-# lähes tyhjiä (esim. ~30 pakettia täyspitkälle elokuvalle), irrotus/kopio meni vajaaksi
-# (Easy Rider -bugi 2026-08-25). Kynnys: väh. 100 pakettia jollain raidalla, tai 1/min elokuvaa.
-MAXPK=0
+# SISÄLLÖN TARKISTUS: varmista ettei irrotus/kopio jäänyt VAJAAKSI. EI luoteta pelkkään
+# pakettimäärään — harvatekstiset kokeelliset elokuvat (esim. Tetsuo 1989) ovat aidosti harvoja.
+# Sen sijaan tarkistetaan että tekstitykset KATTAVAT elokuvan: viimeinen teksti on lähellä loppua.
+# (Easy Rider -bugi: vajaa kopio -> tekstit loppuivat ~ensimmäisiin minuutteihin.)
+MAXPK=0; MAXEND=0
 for _i in $(seq 0 $((NSUB-1))); do
-  _c=$(ffprobe -v error -select_streams s:$_i -show_entries packet=pts_time -of csv=p=0 subs.mkv 2>/dev/null | wc -l)
-  [ "$_c" -gt "$MAXPK" ] && MAXPK=$_c
+  _pts=$(ffprobe -v error -select_streams s:$_i -show_entries packet=pts_time -of csv=p=0 subs.mkv 2>/dev/null)
+  _c=$(printf '%s\n' "$_pts" | grep -c .)
+  _e=$(printf '%s\n' "$_pts" | tail -1 | cut -d. -f1)
+  [ -n "$_e" ] || _e=0
+  [ "$_c" -gt "$MAXPK" ]  && MAXPK=$_c
+  [ "$_e" -gt "$MAXEND" ] && MAXEND=$_e
 done
-MINEXPECT=$(( LIBDUR/60 ))   # karkea: väh. ~1 tekstitys per minuutti elokuvaa
-[ "$MINEXPECT" -lt 100 ] && MINEXPECT=100
-if [ "$MAXPK" -lt "$MINEXPECT" ]; then
-  die "Tekstitysraidat epäilyttävän tyhjiä (suurin vain $MAXPK pakettia, odotus ~$MINEXPECT). Kopio jäi todennäköisesti vajaaksi — KIRJASTOA EI MUUTETTU. Tulos: $JOB/subs.mkv"
+NEEDEND=$(( LIBDUR*60/100 ))   # tekstitysten pitää kattaa >= 60% elokuvan kestosta
+if [ "$MAXPK" -lt 5 ] || [ "$MAXEND" -lt "$NEEDEND" ]; then
+  die "Tekstitys jäi vajaaksi: kattaa vain ${MAXEND}s / ${LIBDUR}s elokuvasta (suurin raita $MAXPK pakettia). Kopio/irrotus todennäköisesti vajaa — KIRJASTOA EI MUUTETTU. Tulos: $JOB/subs.mkv"
 fi
-log "Sisältötarkistus OK (suurin raita $MAXPK pakettia)."
+log "Sisältötarkistus OK (tekstit kattavat ${MAXEND}s/${LIBDUR}s, suurin raita $MAXPK pakettia)."
 
 # Levyä ei enää tarvita (loppu on paikallista remuxia) -> avaa kelkka merkiksi että
 # levyn voi ottaa/vaihtaa. Skripti jatkaa taustalla remuxiin ja korvaukseen.
