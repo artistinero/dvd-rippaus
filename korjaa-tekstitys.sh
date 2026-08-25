@@ -102,6 +102,10 @@ fi
 NSUB=$(ffprobe -v error -select_streams s -show_entries stream=index -of csv=p=0 subs.mkv 2>/dev/null | wc -l)
 log "Irrotettu $NSUB tekstitysraitaa."
 
+# Levyä ei enää tarvita (loppu on paikallista remuxia) -> avaa kelkka merkiksi että
+# levyn voi ottaa/vaihtaa. Skripti jatkaa taustalla remuxiin ja korvaukseen.
+eject "$DRIVE" 2>/dev/null && log "Kelkka avattu — levyn voi ottaa. Skripti viimeistelee taustalla."
+
 # --- 3. lisää PAKOLLINEN size-rivi + kielet, rakenna mkvmerge-argumentit ---
 python3 - "$JOB" << 'PY'
 import json, subprocess, sys, os
