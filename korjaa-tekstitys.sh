@@ -30,10 +30,23 @@ die(){ echo "VIRHE: $*" >&2; exit 1; }
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
 FOLDER="${1:-}"
-[ -n "$FOLDER" ] || die "Anna elokuvan kansion nimi, esim: $0 \"Freejack (1992)\""
-DEST="$MOVIES/$FOLDER"
-[ -d "$DEST" ] || DEST="$MOVIES/scifi/$FOLDER"      # scifi-alikansio
-[ -d "$DEST" ] || die "Kansiota ei löydy: $MOVIES/$FOLDER"
+[ -n "$FOLDER" ] || die "Anna elokuvan nimi (osittainenkin käy), esim: $0 \"Lipton Cockton\""
+# Etsi kansio: ensin tarkka nimi, sitten osittainen (case-insensitive) haku koko movies-puusta.
+if [ -d "$MOVIES/$FOLDER" ]; then
+  DEST="$MOVIES/$FOLDER"
+else
+  mapfile -t MATCHES < <(find "$MOVIES" -maxdepth 2 -type d -iname "*$FOLDER*" 2>/dev/null)
+  if [ "${#MATCHES[@]}" -eq 0 ]; then
+    die "Kansiota ei löydy nimellä \"$FOLDER\". Tarkista kirjoitusasu."
+  elif [ "${#MATCHES[@]}" -gt 1 ]; then
+    echo "Useita osumia nimellä \"$FOLDER\" — tarkenna:" >&2
+    printf '  %s\n' "${MATCHES[@]##*/}" >&2
+    exit 1
+  fi
+  DEST="${MATCHES[0]}"
+  FOLDER="${DEST##*/}"   # käytä täyttä kansionimeä tästä eteenpäin
+  log "Löydettiin: $FOLDER"
+fi
 
 [ -x "$FFMPEG_DVD" ] || die "dvdvideo-ffmpeg puuttuu: $FFMPEG_DVD"
 command -v lsdvd >/dev/null || die "lsdvd puuttuu (sudo apt install lsdvd)"
