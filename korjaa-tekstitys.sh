@@ -105,13 +105,24 @@ else
   # dvdbackup -M = KOKO rakenne (tarvitaan VIDEO_TS.IFO + VTS_NN_0.IFO, muuten dvdvideo ei navigoi)
   dvdbackup -i "$DRIVE" -o "$JOB" -M > dvdbackup.log 2>&1 < /dev/null &
   bpid=$!
-  # odota kunnes VTS-rakenne valmis TAI prosessi loppuu (dvdbackup jää joskus roikkumaan lopetukseen)
+  # Odota kunnes KOHDE-VTS on KOKONAAN kopioitu. TÄRKEÄ: älä tapa heti kun ensimmäinen VOB-osa
+  # ilmestyy — iso titteli on useassa VOB-osassa, ja liian aikainen tappo jättää kopion vajaaksi
+  # -> irrotus saa vain osan tekstityksistä (Easy Rider -bugi 2026-08-25). Seuraa VOB-osien
+  # yhteiskokoa: kun se ei enää kasva (30s vakaa), kohde-VTS on valmis -> tapa dvdbackup.
   VTS=$(printf 'VTS_%02d' "$TITLE")
+  prev=-1; stable=0
   while kill -0 $bpid 2>/dev/null; do
     sleep 15
     V=$(find "$JOB" -iname VIDEO_TS -type d 2>/dev/null | head -1)
-    [ -n "$V" ] && [ -f "$V/${VTS}_0.IFO" ] && [ -f "$V/VIDEO_TS.IFO" ] && \
-      ls "$V/${VTS}_"[1-9]*.VOB >/dev/null 2>&1 && { sleep 30; kill $bpid 2>/dev/null; break; }
+    [ -n "$V" ] && [ -f "$V/${VTS}_0.IFO" ] && [ -f "$V/VIDEO_TS.IFO" ] || continue
+    cur=$(du -sb "$V/${VTS}"_[1-9]*.VOB 2>/dev/null | awk '{s+=$1} END{print s+0}')
+    if [ "$cur" -gt 0 ] && [ "$cur" -eq "$prev" ]; then
+      stable=$((stable+1))
+      [ "$stable" -ge 2 ] && { kill $bpid 2>/dev/null; break; }   # 2×15s = 30s ei kasvua = valmis
+    else
+      stable=0
+    fi
+    prev=$cur
   done
   V=$(find "$JOB" -iname VIDEO_TS -type d 2>/dev/null | head -1)
   D=$(dirname "$V")
@@ -122,6 +133,21 @@ fi
 
 NSUB=$(ffprobe -v error -select_streams s -show_entries stream=index -of csv=p=0 subs.mkv 2>/dev/null | wc -l)
 log "Irrotettu $NSUB tekstitysraitaa."
+
+# SISÄLLÖN TARKISTUS: laske suurin tekstityspakettimäärä raitojen yli. Jos KAIKKI raidat ovat
+# lähes tyhjiä (esim. ~30 pakettia täyspitkälle elokuvalle), irrotus/kopio meni vajaaksi
+# (Easy Rider -bugi 2026-08-25). Kynnys: väh. 100 pakettia jollain raidalla, tai 1/min elokuvaa.
+MAXPK=0
+for _i in $(seq 0 $((NSUB-1))); do
+  _c=$(ffprobe -v error -select_streams s:$_i -show_entries packet=pts_time -of csv=p=0 subs.mkv 2>/dev/null | wc -l)
+  [ "$_c" -gt "$MAXPK" ] && MAXPK=$_c
+done
+MINEXPECT=$(( LIBDUR/60 ))   # karkea: väh. ~1 tekstitys per minuutti elokuvaa
+[ "$MINEXPECT" -lt 100 ] && MINEXPECT=100
+if [ "$MAXPK" -lt "$MINEXPECT" ]; then
+  die "Tekstitysraidat epäilyttävän tyhjiä (suurin vain $MAXPK pakettia, odotus ~$MINEXPECT). Kopio jäi todennäköisesti vajaaksi — KIRJASTOA EI MUUTETTU. Tulos: $JOB/subs.mkv"
+fi
+log "Sisältötarkistus OK (suurin raita $MAXPK pakettia)."
 
 # Levyä ei enää tarvita (loppu on paikallista remuxia) -> avaa kelkka merkiksi että
 # levyn voi ottaa/vaihtaa. Skripti jatkaa taustalla remuxiin ja korvaukseen.
