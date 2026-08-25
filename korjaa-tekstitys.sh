@@ -58,10 +58,18 @@ SAFE=$(echo "$FOLDER" | tr -c 'A-Za-z0-9' '_')
 JOB="$WORK/$SAFE"; rm -rf "$JOB"; mkdir -p "$JOB"; cd "$JOB" || die "cd $JOB"
 
 # --- 1. tunnista pisin titteli levyltä ---
+# Sulje kelkka ensin (skripti avaa sen lopuksi, joten levynvaihdon jälkeen se on auki).
+# Odota levyn pyörähtämistä käyntiin ennen lukua.
+eject -t "$DRIVE" 2>/dev/null && sleep 12
 log "Luen levyn rakenteen ($DRIVE)..."
-TITLE=$(lsdvd "$DRIVE" 2>/dev/null | awk '/^Title:/{gsub(",","",$2); t=$2} /Longest track:/{print $3}' | tail -1)
-[ -n "$TITLE" ] || TITLE=$(lsdvd "$DRIVE" 2>/dev/null | awk -F',' '/^Title:/{print $1}' | sed 's/Title: //' | head -1)
-[ -n "$TITLE" ] || die "Levyä ei voi lukea. Onko levy asemassa? Kokeile kelkan avaus/sulku."
+TITLE=""
+for _try in 1 2 3; do
+  TITLE=$(lsdvd "$DRIVE" 2>/dev/null | awk '/^Title:/{gsub(",","",$2); t=$2} /Longest track:/{print $3}' | tail -1)
+  [ -n "$TITLE" ] || TITLE=$(lsdvd "$DRIVE" 2>/dev/null | awk -F',' '/^Title:/{print $1}' | sed 's/Title: //' | head -1)
+  [ -n "$TITLE" ] && break
+  sleep 8
+done
+[ -n "$TITLE" ] || die "Levyä ei voi lukea. Onko levy asemassa ja ehjä? Kokeile kelkan avaus/sulku."
 TITLE=$((10#$TITLE))
 log "Pääelokuva = titteli $TITLE"
 
