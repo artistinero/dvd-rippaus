@@ -100,8 +100,10 @@ luovuttaminen, ellei parempaa CSS-yhteensopivaa palautustyökalua löydy.
   levyvaurio vaan levyn looginen navigointirakenne (IFO/PGC) jota libdvdread/libdvdnav looppaa.
   Kokeiltu 2× dvdvideo suoraan + 2× dvdbackup -t 1 → kaikki jumittuivat. Kirjaston tekstitys yhä
   KORJAAMATON (Part 01 = 108min desync, 8 raitaa; ekstrat Part02/03/04 jo nimetty Extra 01/02/03).
-  **Kokeiltavat jatkotavat:** eri optinen asema, levyn puhdistus, tai ro-mount + suora VOB-kopiointi
-  (ohittaa libdvdread-navigoinnin). Ei ratkaistu.
+  **RATKAISTU 2026-08-25:** korjattu skripti (korjaa-tekstitys.sh) onnistui — SUORA luku toimi
+  8 minuutissa ilman jumia, kun asema oli kunnossa. Vahvistaa: aiempi jumi oli aseman huono
+  tila (toistuvasta hakkaamisesta), EI levyvika. Tekstitykset korjattu (8 raitaa), nimeäminen
+  tehty (Part 01 -> Being John Malkovich.mkv). EI enää hankala.
   - **KORJAUS 2026-08-25 (lokitarkistus):** rippausloki (rip-dvd.log 2026-08-15/16) osoittaa että
     tämä levy RIPATTIIN AIKANAAN PUHTAASTI — lähde 6,1G luettiin kokonaan, kaikki 4 osaa enkoodattiin
     virheittä. Levy EI siis ole itsessään vaurioitunut/lukukelvoton. Nykyinen jumitus johtui
