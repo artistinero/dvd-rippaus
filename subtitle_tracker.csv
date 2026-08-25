@@ -2,7 +2,7 @@ teos,kesto_min,tila,korjattu_levylta,huomiot,tiedostopolku
 Elämä on Pythonia (1971),85,KUNNOSSA,KYLLÄ,"KORJATTU 2026-08-19: uudelleenenkoodattu suoraan levyltä uudella HandBrakella (1.9.2+ jälkeinen, korjaa VobSub off-by-one-bugin). Käyttäjä vahvisti VNC-playerillä että tekstitys menee kohdilleen. Kaikki 4 tekstitysraitaa mukana (2x suomi, 2x ruotsi). Vanha rikkinäinen tiedosto varmuuskopioitu: /home/keitsi/dvd-rip-tmp/_vanhat_ennen_tekstityskorjausta/",/mnt/terastation/dlna/vids/movies/Elämä on Pythonia (1971)/Elämä on Pythonia.mkv
 "Woody Allen - Manhattan, Movies & Me (2011)",108,RIKKI,EI,"Käyttäjä vahvisti katsoessaan: tekstitys sekaisin (""mullin mallin"") alusta lähtien, ei myöhemmin hyppäävä. AIEMPI ffprobe-analyysin ""hyppää 50min kohdalla"" -löydös oli tämän epäluotettavan heuristiikan harhaanjohtava tulos, ei todellinen kuvaus viasta — poistettu tästä.","/mnt/terastation/dlna/vids/documentaries/Woody Allen - Manhattan, Movies & Me (2011)/Woody Allen - Manhattan, Movies & Me - Part 01.mkv"
 101 Reykjavik (2000),85,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/101 Reykjavik (2000)/101 Reykjavik.mkv
-12 apinaa (1995),124,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/12 apinaa (1995)/12 apinaa - Part 01.mkv
+12 apinaa (1995),124,KORJATTU,KYLLÄ,"2026-08-25 korjaa-tekstitys.sh, 12 raitaa, suora irrotus. Video 542 -> ei sijaintibugia. Käyttäjä ei valittanut = kunnossa.",/mnt/terastation/dlna/vids/movies/12 apinaa (1995)/12 apinaa - Part 01.mkv
 12 apinaa (1995),88,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/12 apinaa (1995)/12 apinaa - Part 02.mkv
 1984 (1984),106,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/1984 (1984)/1984 - Part 01.mkv
 2001- Avaruusseikkailu (1968),143,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/2001- Avaruusseikkailu (1968)/2001- Avaruusseikkailu - Part 01.mkv
@@ -26,7 +26,7 @@ Cube²- Hypercube (2002),90,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/
 Easy Rider (1969),92,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/Easy Rider (1969)/Easy Rider.mkv
 Eräs rakkaus tarina (1969),114,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/Eräs rakkaus tarina (1969)/Eräs rakkaus tarina - Part 01.mkv
 Everything You Always Wanted to Know About Sex- (-But Were Afraid to Ask) (1972),84,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/Everything You Always Wanted to Know About Sex- (-But Were Afraid to Ask) (1972)/Everything You Always Wanted to Know About Sex- (-But Were Afraid to Ask) - Part 01.mkv
-Fargo (1996),94,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/Fargo (1996)/Fargo - Part 01.mkv
+Fargo (1996),94,KORJATTU,KYLLÄ,"2026-08-25 korjaa-tekstitys.sh, 4 raitaa (dan/fin). Video rajattu 408 (kuvasuhde ~Big Lebowski). Käyttäjä ei valittanut = kunnossa.",/mnt/terastation/dlna/vids/movies/Fargo (1996)/Fargo - Part 01.mkv
 Freejack (1992),105,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/Freejack (1992)/Freejack - Part 01.mkv
 Futurama - Bender's Game (2008),84,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/Futurama - Bender's Game (2008)/Futurama - Bender's Game - Part 01.mkv
 Futurama - Into the Wild Green Yonder (2009),86,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/Futurama - Into the Wild Green Yonder (2009)/Futurama - Into the Wild Green Yonder - Part 01.mkv
