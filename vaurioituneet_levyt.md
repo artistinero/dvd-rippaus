@@ -102,3 +102,10 @@ luovuttaminen, ellei parempaa CSS-yhteensopivaa palautustyökalua löydy.
   KORJAAMATON (Part 01 = 108min desync, 8 raitaa; ekstrat Part02/03/04 jo nimetty Extra 01/02/03).
   **Kokeiltavat jatkotavat:** eri optinen asema, levyn puhdistus, tai ro-mount + suora VOB-kopiointi
   (ohittaa libdvdread-navigoinnin). Ei ratkaistu.
+  - **KORJAUS 2026-08-25 (lokitarkistus):** rippausloki (rip-dvd.log 2026-08-15/16) osoittaa että
+    tämä levy RIPATTIIN AIKANAAN PUHTAASTI — lähde 6,1G luettiin kokonaan, kaikki 4 osaa enkoodattiin
+    virheittä. Levy EI siis ole itsessään vaurioitunut/lukukelvoton. Nykyinen jumitus johtui
+    todennäköisesti optisen aseman huonosta tilasta (toistuvat jumittuneet luvut lukitsivat aseman),
+    EI levyvauriosta — Freejack lähti toimimaan vasta kun asema oli toipunut itsestään. TOIMENPIDE:
+    yritä BJM uudelleen tuoreella asemalla (kelkan avaus/sulku ensin), älä hakkaa peräkkäin.
+
