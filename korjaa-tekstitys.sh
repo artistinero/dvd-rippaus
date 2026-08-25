@@ -83,6 +83,12 @@ for _try in 1 2 3; do
   sleep 8
 done
 [ -n "$LSD" ] || die "Levyä ei voi lukea. Onko levy asemassa ja ehjä? Kokeile kelkan avaus/sulku."
+# Jos titteli annettu käsin 2. argumenttina, käytä sitä (esim. sarjan jaksoille joissa kesto
+# ei erottele tittelöitä luotettavasti: korjaa-tekstitys.sh "Andromeda S01E02" 2).
+if [ -n "${2:-}" ]; then
+  TITLE=$((10#$2)); _best=0
+  log "Titteli annettu käsin: $TITLE"
+else
 # Valitse titteli jonka kesto on lähinnä kohdetiedostoa (moniosaisella levyllä kaksi pitkää
 # titteliä -> pisin ei riitä, pitää täsmätä oikea jakso keston perusteella).
 TITLE=""; _best=999999
@@ -101,6 +107,7 @@ if [ "$_best" -gt 180 ]; then
   log "VAROITUS: lähin levyn titteli poikkeaa kohteesta ${_best}s — tarkista tulos erityisen huolella."
 fi
 log "Valittu levyn titteli $TITLE (kestoero ${_best}s kohteeseen)."
+fi
 
 # --- 2. irrota tekstitykset: yritä suoraa dvdvideo-lukua, jumittaessa dvdbackup ---
 extract(){ # $1 = lähde (levy tai VIDEO_TS-kansio)
@@ -199,11 +206,19 @@ mapfile -d "" -t MA < ma.txt
 mkvmerge -o "$JOB/RESULT.mkv" --no-subtitles "$LIB" "${MA[@]}" > mux.log 2>&1 || die "mkvmerge epäonnistui, ks. $JOB/mux.log"
 
 # --- 5. verifiointi ---
+# HUOM: EI verrata format-kestoa — se heijastaa tekstitysraidan pituutta, ei videota (vanhat
+# desync-tekstitykset voivat venyä videon yli -> väärä hälytys, Andromeda-tapaus 2026-08-25).
+# mkvmerge --no-subtitles LIB kopioi videon+äänen sellaisenaan, joten sisältö säilyy varmasti;
+# tarkistetaan että video+ääni-raidat säilyivät ja tekstitysmäärä täsmää.
 RN=$(ffprobe -v error -select_streams s -show_entries stream=index -of csv=p=0 "$JOB/RESULT.mkv" 2>/dev/null | wc -l)
-RDUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$JOB/RESULT.mkv" 2>/dev/null | cut -d. -f1)
-[ "$RN" -eq "$NSUB" ] || die "Raitamäärä ei täsmää ($RN vs $NSUB) — kirjastoa EI muutettu. Tulos: $JOB/RESULT.mkv"
-[ "$RDUR" -gt $((LIBDUR-5)) ] || die "Kesto muuttui epäilyttävästi — kirjastoa EI muutettu. Tulos: $JOB/RESULT.mkv"
-log "Verifiointi OK: $RN raitaa, $((RDUR/60)) min."
+RVA=$(ffprobe -v error -select_streams v -show_entries stream=index -of csv=p=0 "$JOB/RESULT.mkv" 2>/dev/null | wc -l)
+LVA=$(ffprobe -v error -select_streams v -show_entries stream=index -of csv=p=0 "$LIB" 2>/dev/null | wc -l)
+RAU=$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "$JOB/RESULT.mkv" 2>/dev/null | wc -l)
+LAU=$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "$LIB" 2>/dev/null | wc -l)
+[ "$RN" -eq "$NSUB" ]  || die "Tekstitysmäärä ei täsmää ($RN vs $NSUB) — kirjastoa EI muutettu. Tulos: $JOB/RESULT.mkv"
+[ "$RVA" -ge 1 ] && [ "$RVA" -eq "$LVA" ] || die "Videoraita katosi/muuttui — kirjastoa EI muutettu. Tulos: $JOB/RESULT.mkv"
+[ "$RAU" -eq "$LAU" ] || die "Ääniraitojen määrä muuttui ($RAU vs $LAU) — kirjastoa EI muutettu. Tulos: $JOB/RESULT.mkv"
+log "Verifiointi OK: $RVA video + $RAU ääni + $RN tekstitystä (video/ääni säilyivät)."
 
 # --- 6. atominen korvaus + varmuuskopio kirjaston ULKOPUOLELLE ---
 BN=$(basename "$LIB")
