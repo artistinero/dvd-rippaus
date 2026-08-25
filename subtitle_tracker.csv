@@ -32,7 +32,7 @@ Futurama - Bender's Game (2008),84,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/
 Futurama - Into the Wild Green Yonder (2009),86,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/Futurama - Into the Wild Green Yonder (2009)/Futurama - Into the Wild Green Yonder - Part 01.mkv
 Futurama - The Beast With a Billion Backs (2008),85,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/Futurama - The Beast With a Billion Backs (2008)/Futurama - The Beast With a Billion Backs - Part 01.mkv
 Infernal Affairs (2004),97,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/Infernal Affairs (2004)/Infernal Affairs - Part 01.mkv
-Lipton Cockton in the shadows of Sodoma (1995),79,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/scifi/Lipton Cockton in the shadows of Sodoma (1995)/Lipton Cockton in the shadows of Sodoma - Part 01.mkv
+Lipton Cockton in the shadows of Sodoma (1995),79,KORJATTU,KYLLÄ,"2026-08-25 korjaa-tekstitys.sh, 2 raitaa (fin/eng). Suora luku jumitti -> skriptin dvdbackup-varasuunnitelma toimi AUTOMAATTISESTI. Käyttäjä vahvisti (alkuoire oli verkkoruuhkaa, ei tekstitysvika). Rajattu 444, sijainti ok.",/mnt/terastation/dlna/vids/movies/scifi/Lipton Cockton in the shadows of Sodoma (1995)/Lipton Cockton in the shadows of Sodoma - Part 01.mkv
 STAR TREK First Contact (1996),106,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/scifi/STAR TREK/STAR TREK First Contact (1996)/STAR TREK First Contact - Part 01.mkv
 STAR TREK Generations (1994),113,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/scifi/STAR TREK/STAR TREK Generations (1994)/STAR TREK Generations - Part 01.mkv
 STAR TREK Insurrection (1998),99,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/scifi/STAR TREK/STAR TREK Insurrection (1998)/STAR TREK Insurrection - Part 01.mkv
@@ -51,5 +51,5 @@ The Astronaut's Wife (1999),105,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/mov
 The Caveman's Valentine (2001),101,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/The Caveman's Valentine (2001)/The Caveman's Valentine.mkv
 The Darjeeling Limited (2007),88,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/The Darjeeling Limited (2007)/The Darjeeling Limited - Part 01.mkv
 The Darjeeling Limited (2007),88,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/The Darjeeling Limited (2007)/The Darjeeling Limited - Part 02.mkv
-The Dead Zone (1983),99,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/The Dead Zone (1983)/The Dead Zone - Part 01.mkv
+The Dead Zone (1983),99,KORJATTU,KYLLÄ,"2026-08-25 korjaa-tekstitys.sh (skripti), 8 raitaa, suora dvdvideo-irrotus onnistui, käyttäjä vahvisti. Täysikorkuinen 576 -> ei sijaintibugia.",/mnt/terastation/dlna/vids/movies/The Dead Zone (1983)/The Dead Zone - Part 01.mkv
 Toisen kerroksen lauluja (2000),95,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/Toisen kerroksen lauluja (2000)/Toisen kerroksen lauluja - Part 02.mkv
