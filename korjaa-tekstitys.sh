@@ -34,7 +34,9 @@ TARGET="${1:-}"
 [ -n "$TARGET" ] || die "Anna nimi (osittainenkin käy): elokuva \"Lipton Cockton\" tai sarjan jakso \"Andromeda S01E01\""
 # Etsi KOHDETIEDOSTO (.mkv) sekä movies- ETTÄ series-puusta (ekstrat pois). Sarjan jakso
 # annetaan täsmällisesti (esim. "Andromeda S01E01"), jotta oikea jakso osuu.
-mapfile -t FILES < <(find "$MOVIES" "$SERIES" -type f -iname "*$TARGET*.mkv" ! -iname '*-extra.mkv' 2>/dev/null | sort)
+# -ipath: hakusana voi osua tiedostonimeen TAI kansiopolkuun (esim. "Tetsuo (1989)" erottaa
+# sen "Tetsuo II":sta; "Andromeda S01E01" osuu tiedostonimeen).
+mapfile -t FILES < <(find "$MOVIES" "$SERIES" -type f -ipath "*$TARGET*" -iname '*.mkv' ! -iname '*-extra.mkv' 2>/dev/null | sort)
 if [ "${#FILES[@]}" -eq 0 ]; then
   die "Tiedostoa ei löydy nimellä \"$TARGET\" (movies/series). Tarkista kirjoitusasu."
 elif [ "${#FILES[@]}" -gt 1 ]; then
