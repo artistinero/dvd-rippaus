@@ -15,7 +15,7 @@ American Beauty (1999),117,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/A
 Arthur's Dyke (2001),104,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/Arthur's Dyke (2001)/Arthur's Dyke - Part 01.mkv
 Barfly (1987),96,KORJATTU,KYLLÄ,"2026-08-24 dvdvideo-menetelmällä, 4 raitaa (da/sv/no/fi), käyttäjä vahvisti synkan katsomalla. desync-varmuuskopio: Barfly.desync-bak.mkv",/mnt/terastation/dlna/vids/movies/Barfly (1987)/Barfly.mkv
 Barton Fink (1991),112,KORJATTU,KYLLÄ,"2026-08-24 dvdvideo-menetelmällä (dvdbackup-varasuunn. koska levy jumitti suorassa luvussa 1:33), 11 raitaa + size-rivi, käyttäjä vahvisti. 7 ekstraa nimetty.",/mnt/terastation/dlna/vids/movies/Barton Fink (1991)/Barton Fink.mkv
-Being John Malkovich (1999),108,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/Being John Malkovich (1999)/Being John Malkovich - Part 01.mkv
+Being John Malkovich (1999),108,KORJATTU,KYLLÄ,"2026-08-25 korjaa-tekstitys.sh, 8 raitaa. Aiemmin ""hankala"" (asematila-jumi), toimi kun asema kunnossa. Nimeäminen tehty.",/mnt/terastation/dlna/vids/movies/Being John Malkovich (1999)/Being John Malkovich.mkv
 Big Lebowski (1998),112,KORJATTU,KYLLÄ,"2026-08-24 dvdvideo-menetelmällä, 8 raitaa + size-rivi (paljasti size-ongelman), käyttäjä vahvisti. Ekstrat nimetty.",/mnt/terastation/dlna/vids/movies/Big Lebowski (1998)/Big Lebowski.mkv
 Brazil (1985),137,KORJATTU,KYLLÄ,"2026-08-25 korjaa-tekstitys.sh, 10 raitaa. Video 552. Käyttäjä vahvisti.",/mnt/terastation/dlna/vids/movies/Brazil (1985)/Brazil - Part 01.mkv
 Circus (2000),92,KORJATTU,KYLLÄ,"2026-08-25 korjaa-tekstitys.sh, 17 raitaa, 1409 pakettia. Video 552. Käyttäjä vahvisti.",/mnt/terastation/dlna/vids/movies/Circus (2000)/Circus - Part 01.mkv
@@ -45,7 +45,7 @@ STAR TREK The Voyage Home (1986),114,TARKISTAMATON,EI,,/mnt/terastation/dlna/vid
 STAR TREK The Wrath of Khan (1982),108,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/scifi/STAR TREK/STAR TREK The Wrath of Khan (1982)/STAR TREK The Wrath of Khan - Part 01.mkv
 Stanley Kubrick - Ohjaajan muotokuva (2001),136,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/documentaries/Stanley Kubrick - Ohjaajan muotokuva (2001)/Stanley Kubrick - Ohjaajan muotokuva.mkv
 Stranded (2001),95,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/scifi/Stranded (2001)/Stranded.mkv
-Tetsuo II (1992),81,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/scifi/Tetsuo II (1992)/Tetsuo II - Part 06.mkv
+Tetsuo II (1992),81,KORJATTU,KYLLÄ,"2026-08-25 korjaa-tekstitys.sh, 1 eng-raita (harva, kokeellinen elokuva), kattaa 96%. Elokuva oli Part 06 -> nimetty Tetsuo II.mkv.",/mnt/terastation/dlna/vids/movies/scifi/Tetsuo II (1992)/Tetsuo II.mkv
 The Astronaut Farmer (2006),100,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/The Astronaut Farmer (2006)/The Astronaut Farmer - Part 01.mkv
 The Astronaut's Wife (1999),105,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/The Astronaut's Wife (1999)/The Astronaut's Wife - Part 03.mkv
 The Caveman's Valentine (2001),101,KORJATTU,KYLLÄ,"2026-08-25 korjaa-tekstitys.sh, 8 raitaa. Video 552. Käyttäjä vahvisti.",/mnt/terastation/dlna/vids/movies/The Caveman's Valentine (2001)/The Caveman's Valentine.mkv
@@ -53,3 +53,5 @@ The Darjeeling Limited (2007),88,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/mo
 The Darjeeling Limited (2007),88,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/The Darjeeling Limited (2007)/The Darjeeling Limited - Part 02.mkv
 The Dead Zone (1983),99,KORJATTU,KYLLÄ,"2026-08-25 korjaa-tekstitys.sh (skripti), 8 raitaa, suora dvdvideo-irrotus onnistui, käyttäjä vahvisti. Täysikorkuinen 576 -> ei sijaintibugia.",/mnt/terastation/dlna/vids/movies/The Dead Zone (1983)/The Dead Zone - Part 01.mkv
 Toisen kerroksen lauluja (2000),95,TARKISTAMATON,EI,,/mnt/terastation/dlna/vids/movies/Toisen kerroksen lauluja (2000)/Toisen kerroksen lauluja - Part 02.mkv
+Tetsuo (1989),64,KORJATTU,KYLLÄ,"2026-08-25 korjaa-tekstitys.sh, 1 eng-raita (harva, kattaa 99%). Elokuva oli Part 06 -> nimetty Tetsuo.mkv. Ei alun perin CSV:ssä (<75min).",/mnt/terastation/dlna/vids/movies/scifi/Tetsuo (1989)/Tetsuo.mkv
+Back to the USSR,,KUNNOSSA,EI,"2026-08-25 käyttäjä tarkisti: kunnossa. Levyllä 2 versiota (alkuperäinen + kansainvälinen); kansainvälinen ekstrana KIINTEÄLLÄ (poltetulla) tekstityksellä -> ei tarvita erillistä tekstitysraitaa.",
