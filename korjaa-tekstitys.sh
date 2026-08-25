@@ -20,6 +20,7 @@ set -u
 DRIVE="/dev/sr1"
 FFMPEG_DVD="/opt/ffmpeg-dvdvideo/bin/ffmpeg"       # dvdvideo-demukserilla käännetty ffmpeg
 MOVIES="/mnt/terastation/dlna/vids/movies"
+SERIES="/mnt/terastation/dlna/vids/series"
 BACKUPS="/mnt/terastation/dlna/desync-backups"     # varmuuskopiot KIRJASTON ULKOPUOLELLE
 JF_KEY_FILE="/home/keitsi/.config/jellyfin-cc-api-key"
 WORK="/home/keitsi/dvd-rip-tmp/tekstityskorjaus"
@@ -29,24 +30,35 @@ STALL_SECS=40         # jos suora luku ei tuota mitään näin monessa sekunniss
 die(){ echo "VIRHE: $*" >&2; exit 1; }
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
-FOLDER="${1:-}"
-[ -n "$FOLDER" ] || die "Anna elokuvan nimi (osittainenkin käy), esim: $0 \"Lipton Cockton\""
-# Etsi kansio: ensin tarkka nimi, sitten osittainen (case-insensitive) haku koko movies-puusta.
-if [ -d "$MOVIES/$FOLDER" ]; then
-  DEST="$MOVIES/$FOLDER"
-else
-  mapfile -t MATCHES < <(find "$MOVIES" -maxdepth 2 -type d -iname "*$FOLDER*" 2>/dev/null)
-  if [ "${#MATCHES[@]}" -eq 0 ]; then
-    die "Kansiota ei löydy nimellä \"$FOLDER\". Tarkista kirjoitusasu."
-  elif [ "${#MATCHES[@]}" -gt 1 ]; then
-    echo "Useita osumia nimellä \"$FOLDER\" — tarkenna:" >&2
-    printf '  %s\n' "${MATCHES[@]##*/}" >&2
+TARGET="${1:-}"
+[ -n "$TARGET" ] || die "Anna nimi (osittainenkin käy): elokuva \"Lipton Cockton\" tai sarjan jakso \"Andromeda S01E01\""
+# Etsi KOHDETIEDOSTO (.mkv) sekä movies- ETTÄ series-puusta (ekstrat pois). Sarjan jakso
+# annetaan täsmällisesti (esim. "Andromeda S01E01"), jotta oikea jakso osuu.
+mapfile -t FILES < <(find "$MOVIES" "$SERIES" -type f -iname "*$TARGET*.mkv" ! -iname '*-extra.mkv' 2>/dev/null | sort)
+if [ "${#FILES[@]}" -eq 0 ]; then
+  die "Tiedostoa ei löydy nimellä \"$TARGET\" (movies/series). Tarkista kirjoitusasu."
+elif [ "${#FILES[@]}" -gt 1 ]; then
+  # Jos kaikki osumat samassa kansiossa (elokuva + osat) -> valitse pisin (= pääelokuva).
+  # Muuten (esim. sarjan useita jaksoja) -> pyydä tarkentamaan.
+  d0="$(dirname "${FILES[0]}")"; samedir=1
+  for f in "${FILES[@]}"; do [ "$(dirname "$f")" = "$d0" ] || samedir=0; done
+  if [ "$samedir" -eq 1 ]; then
+    LIB=""; _md=0
+    for f in "${FILES[@]}"; do
+      _d=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$f" 2>/dev/null | cut -d. -f1)
+      [ -n "$_d" ] && [ "$_d" -gt "$_md" ] && { _md=$_d; LIB=$f; }
+    done
+  else
+    echo "Useita osumia nimellä \"$TARGET\" — tarkenna (esim. lisää jaksonumero S01E01):" >&2
+    printf '  %s\n' "${FILES[@]#$MOVIES/}" >&2
     exit 1
   fi
-  DEST="${MATCHES[0]}"
-  FOLDER="${DEST##*/}"   # käytä täyttä kansionimeä tästä eteenpäin
-  log "Löydettiin: $FOLDER"
+else
+  LIB="${FILES[0]}"
 fi
+DEST="$(dirname "$LIB")"
+FOLDER="$(basename "$LIB" .mkv)"
+log "Löydettiin: $(basename "$LIB")  (kansio: ${DEST##*/})"
 
 [ -x "$FFMPEG_DVD" ] || die "dvdvideo-ffmpeg puuttuu: $FFMPEG_DVD"
 command -v lsdvd >/dev/null || die "lsdvd puuttuu (sudo apt install lsdvd)"
@@ -57,30 +69,38 @@ mkdir -p "$WORK" "$BACKUPS"
 SAFE=$(echo "$FOLDER" | tr -c 'A-Za-z0-9' '_')
 JOB="$WORK/$SAFE"; rm -rf "$JOB"; mkdir -p "$JOB"; cd "$JOB" || die "cd $JOB"
 
-# --- 1. tunnista pisin titteli levyltä ---
+# --- 1. lue levy + valitse titteli KOHDETIEDOSTON KESTON mukaan ---
 # Sulje kelkka ensin (skripti avaa sen lopuksi, joten levynvaihdon jälkeen se on auki).
-# Odota levyn pyörähtämistä käyntiin ennen lukua.
 eject -t "$DRIVE" 2>/dev/null && sleep 12
+LIBDUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$LIB" 2>/dev/null | cut -d. -f1)
+[ -n "$LIBDUR" ] && [ "$LIBDUR" -gt 0 ] || die "Kohdetiedoston kestoa ei saatu: $LIB"
+log "Kohdetiedosto: $(basename "$LIB") ($((LIBDUR/60)) min)"
 log "Luen levyn rakenteen ($DRIVE)..."
-TITLE=""
+LSD=""
 for _try in 1 2 3; do
-  TITLE=$(lsdvd "$DRIVE" 2>/dev/null | awk '/^Title:/{gsub(",","",$2); t=$2} /Longest track:/{print $3}' | tail -1)
-  [ -n "$TITLE" ] || TITLE=$(lsdvd "$DRIVE" 2>/dev/null | awk -F',' '/^Title:/{print $1}' | sed 's/Title: //' | head -1)
-  [ -n "$TITLE" ] && break
+  LSD=$(lsdvd "$DRIVE" 2>/dev/null | grep '^Title:')
+  [ -n "$LSD" ] && break
   sleep 8
 done
-[ -n "$TITLE" ] || die "Levyä ei voi lukea. Onko levy asemassa ja ehjä? Kokeile kelkan avaus/sulku."
-TITLE=$((10#$TITLE))
-log "Pääelokuva = titteli $TITLE"
-
-# --- kohde kirjastossa: pisin .mkv kansiossa ---
-LIB=""; LIBDUR=0
-while IFS= read -r f; do
-  d=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$f" 2>/dev/null | cut -d. -f1)
-  [ -n "$d" ] && [ "$d" -gt "$LIBDUR" ] && { LIBDUR=$d; LIB=$f; }
-done < <(find "$DEST" -maxdepth 1 -iname '*.mkv' ! -iname '*-extra.mkv')
-[ -n "$LIB" ] || die "Kirjaston .mkv:tä ei löydy kansiosta $DEST"
-log "Kohdetiedosto: $(basename "$LIB") ($((LIBDUR/60)) min)"
+[ -n "$LSD" ] || die "Levyä ei voi lukea. Onko levy asemassa ja ehjä? Kokeile kelkan avaus/sulku."
+# Valitse titteli jonka kesto on lähinnä kohdetiedostoa (moniosaisella levyllä kaksi pitkää
+# titteliä -> pisin ei riitä, pitää täsmätä oikea jakso keston perusteella).
+TITLE=""; _best=999999
+while IFS= read -r line; do
+  tn=$(echo "$line"  | sed -E 's/^Title: 0*([0-9]+),.*/\1/')
+  hh=$(echo "$line" | sed -E 's/.*Length: ([0-9]+):([0-9]+):([0-9]+).*/\1/')
+  mm=$(echo "$line" | sed -E 's/.*Length: ([0-9]+):([0-9]+):([0-9]+).*/\2/')
+  ss=$(echo "$line" | sed -E 's/.*Length: ([0-9]+):([0-9]+):([0-9]+).*/\3/')
+  [ -n "$tn" ] && [ -n "$hh" ] || continue
+  secs=$((10#$hh*3600 + 10#$mm*60 + 10#$ss))
+  diff=$(( secs>LIBDUR ? secs-LIBDUR : LIBDUR-secs ))
+  [ "$diff" -lt "$_best" ] && { _best=$diff; TITLE=$tn; }
+done <<< "$LSD"
+[ -n "$TITLE" ] || die "Levyltä ei löytynyt sopivaa titteliä."
+if [ "$_best" -gt 180 ]; then
+  log "VAROITUS: lähin levyn titteli poikkeaa kohteesta ${_best}s — tarkista tulos erityisen huolella."
+fi
+log "Valittu levyn titteli $TITLE (kestoero ${_best}s kohteeseen)."
 
 # --- 2. irrota tekstitykset: yritä suoraa dvdvideo-lukua, jumittaessa dvdbackup ---
 extract(){ # $1 = lähde (levy tai VIDEO_TS-kansio)
