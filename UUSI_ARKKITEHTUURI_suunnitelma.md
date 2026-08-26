@@ -1,249 +1,320 @@
-# Uusi rippaus-/enkoodausarkkitehtuuri — täydellinen suunnitelma
+# DVD-rippaus- ja enkoodausjärjestelmä — täydellinen spesifikaatio (puhtaalta pöydältä)
 
-Tavoite: korvata nykyinen rip-dvd.sh järjestelmällä joka on (1) **robusti**, (2) käyttää **yhtä
-globaalia enkoodausjonoa** (rinnakkaisuus toimii ilman monia sessioita), (3) tallentaa **kaiken
-metadatan valmiiksi**, (4) **tunnistaa ja siirtää viat sivuun** ajantasaiselle listalle, (5) on
-**konfiguroitava** (kansiot, laatu ym.), ja (6) rakenteeltaan **GUI-valmis** (ydin erillään
-käyttöliittymästä).
+Tämä on **itsenäinen spesifikaatio**: se määrittelee järjestelmän vaatimuksina ja sopimuksina
+ilman viittausta mihinkään olemassa olevaan koodiin. Toteuttaja (ihminen tai toinen Claude Code
+-instanssi) voi rakentaa kokonaan uuden toteutuksen pelkästään tämän dokumentin perusteella.
+Kaikki tila-, komento- ja tiedostoformaatit on määritelty täsmällisesti.
 
-Tämä on SUUNNITELMA, ei toteutus. Toteutus tehdään vaiheittain ja testataan ennen tuotantoa —
-mitään ei deployata käynnissä olevan rippauksen päälle ennen hyväksyntää.
-
----
-
-## 0. Nykyisen rip-dvd.sh:n ongelmat joita tämä korjaa (kamman kanssa läpikäynti)
-
-Löydetty tämän ja aiempien sessioiden aikana:
-
-1. **Ei globaalia jonoa.** Jokainen ripattu levy → oma session-hakemisto + oma `.encode-only`-kutsu.
-   Rinnakkaisuus toimii vain eri sessioiden VÄLILLÄ; yhden session sisällä per-session-lukko
-   sarjallistaa. 17 levyä yhteen sessioon → 17 lukon takana jonottavaa prosessia, 1 ajaa.
-2. **Lähde-VOB:it jäävät siivoamatta** valmistuneista sessioista → 270 GB roskaa levyllä (82 %
-   täynnä), JA pending-tarkistus (perustuu "onko VOB olemassa") listaa valmiit sessiot
-   käynnistys­kehotteessa.
-3. **Valmis-tunnistus hauras.** Raporttimuoto vaihtelee (vanhoissa ei UNTRIED-riviä); jaettu
-   `.encode-report` ylikirjoittuu joka osa-ajolla eikä kerro session kumulatiivista totuutta.
-4. **Laatu (CRF 21) kovakoodattu** — käyttäjä oletti parasta mahdollista, ei kysytty. Pitää olla
-   konfiguroitava.
-5. **Metadataa ei tallenneta** rippausvaiheessa (kestot, tekstityskielet, mitat, fps, levyn kunto)
-   → jälkikäteen probeaminen hidasta ja hauraaa (lsdvd/ffprobe epäonnistuu osalle).
-6. **Viat yritetään enkoodata** joka kerta uudelleen sen sijaan että rikkinäiset siirrettäisiin
-   sivuun. Ei ajantasaista "ongelmalliset"-listaa.
-7. **Tekstitysbugi** (vanha HandBrake VobSub-desync) — levykohtainen, ei versiokohtainen; erillinen
-   korjaustyökalu (korjaa-tekstitys.sh) rakennettu. Uusi HandBrake korjaa tulevat.
-8. **Sijaintibugi** (anamorfiset/rajatut videot: tekstit ruudun ulkopuolella) — pitää huomioida
-   crop-tiedon tallennuksessa.
-9. **Ekstrojen nimeäminen / pääelokuvan tunnistus** — monta erikoistapausta (pääelokuva ei Part 01;
-   Astronaut's Wife=Part03, Tetsuo=Part06). Numerointi laskettu epäluotettavasti.
-10. **Interaktiiviset promptit sekoittuvat ydinlogiikkaan** → GUI mahdoton rakentaa nykyisen päälle.
+Toteutuskieli oletuksena bash + jq + python3 + HandBrakeCLI + dvdbackup + lsdvd + mkvtoolnix +
+ffprobe. Ne voi vaihtaa kunhan sopimukset (§4 datamalli, §5 komennot) säilyvät.
 
 ---
 
-## 1. Perusperiaate: YDIN erillään KÄYTTÖLIITTYMÄSTÄ (GUI-valmius)
+## 1. Tarkoitus ja periaatteet
 
-Kaikki logiikka on **ydinkomennoissa** jotka eivät koskaan kysy interaktiivisesti mitään ja
-lukevat/kirjoittavat **koneluettavaa tilaa** (JSON/JSONL). Käyttöliittymä (nyt CLI, myöhemmin GUI)
-on ohut kerros joka kutsuu ydinkomentoja ja renderöi tilatiedostot.
+Järjestelmä rippaa DVD-levyjä, enkoodaa ne x265-mkv:ksi mediakirjastoon, ja hallitsee tätä
+**yhtenä globaalina jonona** joka enkoodaa N kohdetta rinnakkain riippumatta siitä miltä levyltä
+kukin on peräisin.
 
-```
-  ┌─────────────┐     kutsuu      ┌──────────────────────────┐
-  │ CLI (nyt)   │ ─────────────►  │  YDIN (komennot)         │
-  │ GUI (myöh.) │                 │  rip / enqueue / dispatch│
-  └─────────────┘  ◄───────────── │  status / skip / retry   │
-        lukee tilan (JSON)        │  config                  │
-                                  └──────────────────────────┘
-                                        │ luku/kirjoitus
-                                  ┌──────────────────────────┐
-                                  │  TILA (koneluettava)     │
-                                  │  queue.jsonl             │
-                                  │  status.json (live)      │
-                                  │  problematic.jsonl       │
-                                  │  config                  │
-                                  └──────────────────────────┘
-```
+**Suunnitteluperiaatteet (sitovat):**
 
-**GUI rakennetaan myöhemmin** lukemalla samoja JSON-tiedostoja ja kutsumalla samoja ydinkomentoja
-— ei tarvitse muuttaa ydintä lainkaan. Tämä on koko GUI-valmiuden ydin: **ei interaktiivisia
-promptteja ytimessä, kaikki tila koneluettavana.**
+1. **Ydin erillään käyttöliittymästä.** Ydinkomennot EIVÄT koskaan kysy interaktiivisesti mitään
+   eivätkä tulosta ihmiselle. Ne ottavat argumentit ja lukevat/kirjoittavat koneluettavaa tilaa
+   (JSON). Käyttöliittymä (CLI nyt, GUI myöhemmin) on ohut kerros joka hoitaa vuorovaikutuksen ja
+   kutsuu ydinkomentoja.
+2. **Kaikki jaettu tila koneluettavana** (JSON), atomisesti kirjoitettuna. Yksikään kahdesta
+   rinnakkaisesta kirjoittajasta ei saa korruptoida tai hävittää toisen kirjoitusta.
+3. **Yksi globaali enkoodausjono.** Ei per-levy- tai per-sessio-jonoja. Rinnakkaisuus toimii yli
+   levyrajojen.
+4. **Kaikki metadata kerätään ja tallennetaan kerran, rippausvaiheessa.** Myöhemmät vaiheet
+   (enkoodaus, tilanäyttö, GUI) eivät probeaa levyjä uudelleen.
+5. **Viat tunnistetaan ja siirretään sivuun.** Rikkinäistä ei koskaan yritetä enkoodata
+   automaattisesti uudelleen. Ongelmallisista pidetään ajantasaista listaa.
+6. **Kaikki asetukset (kansiot, laatu, kynnykset, rinnakkaisuus) ovat konfiguroitavia.** Mitään
+   käyttäjää koskevaa arvoa ei kovakoodata.
+7. **Peruuttamattomat operaatiot (lähteen poisto, kirjaston ylikirjoitus) vaativat aina
+   sisältöverifioinnin ennen suoritusta.** Pelkkä "tiedosto on olemassa" ei riitä.
+8. **Mitään ei viedä tuotantoon testaamatta.** §11 määrittelee testit jotka on läpäistävä.
 
 ---
 
-## 2. Konfiguraatio (konfiguroitavat kansiot ym.)
+## 2. Tila-arkkitehtuuri (ratkaisee rinnakkaisuuden dataeheyden)
 
-Yksi tiedosto `~/.config/rip-dvd/config` (KEY=VALUE, laajennetaan nykyisestä):
+Suurin datariski on jaetun jonotiedoston rinnakkainen muokkaus. Ratkaisu: **per-job-tiedostot,
+ei yhtä muokattavaa jonotiedostoa.**
 
 ```
-# Rinnakkaisuus
+$STATE/                         (STATE = $WORK_DIR/state)
+  jobs/<id>.json                Yksi tiedosto per enkoodaustyö. Ainoa totuus jobin tilasta.
+                                Muutos = kirjoita temp + atominen mv (rename). Ei koskaan
+                                osittaista tilaa lukijalle. Kutakin jobia muuttaa kerrallaan
+                                vain se joka omistaa sen (dispatcher-slotti tai rip-komento
+                                luontihetkellä) -> ei kilpajuoksua kentän muokkaukseen.
+  status.json                   Live-yhteenveto (dispatcher kirjoittaa, temp+mv). Vain LUKUA
+                                käyttöliittymille. Johdettu jobs/-tiedostoista.
+  problematic/<id>.json         Ongelmalliset (viat). Per-job-tiedosto, sama atomisuus.
+  locks/<hash>.lock             flock-tiedostot per-kohdekansio-varaukseen (ekstrojen numerointi).
+  slots/slot-N.lock             Rinnakkaisslottien varaus (dispatcher).
+```
+
+**Miksi per-job-tiedostot:** jobin tilamuutos = yhden pienen tiedoston atominen korvaus
+(temp+mv). Ei koko jonon uudelleenkirjoitusta, ei kahden valmistuvan jobin kilpajuoksua, ei
+"rip lisää samalla kun dispatcher kirjoittaa" -korruptiota. "Jono" = hakemistolistaus
+`jobs/*.json` (luonti = uusi tiedosto, poisto = ei koskaan; valmistuminen = statuskentän
+muutos). Jonon "järjestys" tulee `added`-aikaleimasta tai juoksevasta `seq`-numerosta jobissa.
+
+`queue.jsonl`-tyyppistä yhtä tiedostoa EI käytetä mutable-tilana. (Halutessa voidaan tuottaa
+read-only johdettu näkymä `status`-komennolla, mutta se ei ole totuuslähde.)
+
+---
+
+## 3. Jobin elinkaari ja tilat
+
+Job = yksi enkoodattava titteli. `status`-enum, **tahallinen ohitus ja epäonnistuminen ovat eri
+tiloja** (kriittinen lähteen siivouksen kannalta):
+
+| status      | merkitys                                              | lähde saa siivota? |
+|-------------|-------------------------------------------------------|--------------------|
+| `pending`   | odottaa enkoodausta                                   | ei                 |
+| `encoding`  | dispatcher-slotti enkoodaa parhaillaan                | ei                 |
+| `done`      | enkoodattu, sisältöverifioitu, kirjastossa            | **kyllä**          |
+| `failed`    | enkoodaus epäonnistui (rc≠0 / verifiointi hylkäsi)    | ei (voi retryä)    |
+| `broken`    | lähde viallinen (lukuvirhe, scan-hang) — ei yritetty  | **ei** (retry tarvitsee lähteen) |
+| `user_skip` | käyttäjä päätti ettei tätä tehdä                      | **kyllä** (tietoinen) |
+
+**Lähteen (disc) VOB:it poistetaan vain kun KAIKKI saman lähteen jobit ovat tilassa jossa
+"siivota=kyllä"** (`done` tai `user_skip`). Yksikin `pending/encoding/failed/broken` estää
+siivouksen. Tämä takaa että `retry` (failed/broken) löytää lähteen aina.
+
+**Dispatcherin kaatumistoipuminen (pakollinen):** dispatcher käynnistyessään käy läpi kaikki
+`encoding`-jobit ja tarkistaa onko niiden `pid` (jobissa) yhä elossa (`kill -0`). Kuollut →
+palauta `pending`, vapauta slotti, poista keskeneräinen temp-tulos. Näin kaatuminen/reboot ei
+jätä ikuisia `encoding`-tiloja eikä vuoda slotteja.
+
+---
+
+## 4. Datamalli (täsmälliset skeemat)
+
+### 4.1 Job: `$STATE/jobs/<id>.json`
+`<id>`: **sisältöpohjainen, deterministinen ja uniikki** — esim. `sha1(source_abs + ":" +
+title)[0:12]`. Sama lähde+titteli tuottaa aina saman id:n → ei törmäyksiä eikä duplikaatteja
+(insert on idempotentti). EI satunnainen.
+
+```json
+{
+  "id": "9f3a1c2b7e04",
+  "seq": 1337,                        // juokseva luontijärjestys (jonojärjestys)
+  "source": "/abs/.../disc-042/VIDEO_TS",  // dvdbackup-tuloksen VIDEO_TS-hakemisto
+  "disc_key": "/abs/.../disc-042",    // lähdelevyn juuri (siivouksen yksikkö)
+  "title": 11,                        // HandBrake/lsdvd-tittelinumero
+  "kind": "movie",                    // movie | series | doc | music | misc
+  "role": "main",                     // main | extra
+  "name": "Fargo",
+  "year": "1996",                     // tyhjä sallittu
+  "season": null,                     // sarjoille
+  "episode": null,                    // sarjoille
+  "dest_dir": "/abs/.../movies/Fargo (1996)",
+  "out_name": "Fargo.mkv",            // main; extroille laskettu enqueuen/lukon sisällä
+  "duration_s": 5640,
+  "width": 712, "height": 408, "dar": "1.86:1", "fps": 25, "format": "PAL",
+  "crop": "66:66:2:2",                // autocrop; huomioi sijaintibugi rajatuilla
+  "subs": ["fin","swe"],              // tekstityskielet (ISO-639)
+  "audio": ["eng"],                   // äänikielet
+  "read_errors": 0,                   // lähdelevyn lukuvirheet (rippausvaiheesta)
+  "status": "pending",
+  "slot": null,                       // varattu slotti kun encoding
+  "pid": null,                        // HandBrake-prosessin PID kun encoding (toipumiseen)
+  "quality": 21, "encoder": "x265",   // efektiiviset arvot (configista enqueue-hetkellä)
+  "added": "2026-08-26T09:00:00Z",
+  "started": null, "finished": null,
+  "fail_reason": null,
+  "confidence": "high"                // high | low (pääelokuvan tunnistuksen varmuus, §7)
+}
+```
+
+### 4.2 Live-tila: `$STATE/status.json` (dispatcher kirjoittaa, temp+mv)
+```json
+{"updated":"2026-08-26T09:05:00Z","parallel":2,
+ "encoding":[{"id":"...","name":"Fargo","pct":42.1,"eta_s":1830,"fps":31.2,"slot":1}],
+ "pending":57,"done":812,"failed":3,"broken":5,
+ "queue_eta_s":41000,"temps_c":[55,58,54,56],"disk_free_gb":80}
+```
+
+### 4.3 Ongelmallinen: `$STATE/problematic/<id>.json`
+Jobin kopio + `reason` + `detected` -aikaleima. Per-job-tiedosto (ei jaettua liitostiedostoa →
+ei append-kilpailua). `review-problematic` listaa hakemiston, `retry <id>` yrittää uudelleen.
+
+### 4.4 Konfiguraatio: `$HOME/.config/rip-dvd/config`
+`AVAIN=arvo` per rivi. **Ei rivinsisäisiä kommentteja** (vain kokonaiset `#`-alkuiset
+kommenttirivit). Parsinta strippaa aina trailing-whitespacen. Kaikki kynnykset mukana:
+```
 PARALLEL=2
-# Laatu (KÄYTTÄJÄN VALITTAVISSA — ei enää kovakoodattu 21)
-CRF=21                    # 18 = lähes häviötön/isot tiedostot, 21 = tasapaino
+CRF=21
 ENCODER=x265
-# Kansiot (KAIKKI konfiguroitavissa)
 DEST_ROOT=/mnt/terastation/dlna/vids
 DIR_MOVIES=movies
 DIR_SERIES=series
 DIR_DOCS=documentaries
 DIR_MUSIC=music
 DIR_MISC=misc
-# Työhakemisto + lämpöturva
 WORK_DIR=/home/keitsi/dvd-rip-tmp
 TEMP_WARN=85
 TEMP_KILL=95
-# Vähimmäiskesto (mikä lasketaan "pitkäksi" tittelöksi)
 MIN_DURATION=300
+READ_ERROR_MAX=20
+SCAN_TIMEOUT=600
+RIP_MIN_FREE_GB=40
+RIP_AHEAD_MAX=8
 ```
-
-Ydin lukee tämän `grep`illä (ei `source`, turvallisuus). Muutokset config-tiedostoon vaikuttavat
-seuraaviin ajoihin; dispatcher lukee PARALLEL/CRF tuoreena joka slot-varauksella (opittu
-50°C-bugista: ei välimuistiin ladattua vanhaa arvoa).
+Luku: `val=$(sed -n "s/^KEY=//p" config | head -1); val="${val%%[[:space:]]*}"` tai vastaava —
+**aina trailing-strippaus.** Ei `source` (ei suoriteta configin sisältöä koodina).
 
 ---
 
-## 3. Globaali enkoodausjono (RINNAKKAISUUDEN KORJAUS)
+## 5. Ydinkomennot (ei-interaktiiviset, sopimukset)
 
-### 3.1 Yksi jonotiedosto: `WORK_DIR/state/queue.jsonl`
-Yksi JSON-rivi per enkoodattava titteli (job). Ei enää session-hakemistoja jonon perustana.
+Kaikki tulostavat JSONia stdoutiin ja/tai muuttavat tilaa; eivät kysy mitään.
 
-```json
-{"id":"a1b2c3","source":"/…/disc-042/VIDEO_TS","title":11,"type":"movie",
- "name":"Fargo","year":"1996","dest":"/…/movies/Fargo (1996)","out":"Fargo.mkv",
- "duration":5640,"width":712,"height":408,"dar":"1.86","fps":25,"format":"PAL",
- "crop":"66:66:2:2","subs":["fin","swe"],"audio":["eng"],"read_errors":0,
- "status":"pending","slot":null,"added":"2026-08-26T09:00:00","started":null,
- "finished":null,"fail_reason":null}
-```
-
-`status` ∈ `pending | encoding | done | failed | skipped | broken`.
-
-### 3.2 Dispatcher (yksi pitkäikäinen prosessi)
-Yksi taustaprosessi (tmux/systemd) joka:
-1. Lukee `queue.jsonl`.
-2. Pitää N slottia (N = PARALLEL, luettu tuoreena).
-3. Poimii seuraavan `pending`-jobin joka EI ole lukittuna (per-dest-lukko ekstrojen numerointiin)
-   ja jonka lämpötila sallii → asettaa `status=encoding`, käynnistää HandBraken.
-4. Kun HandBrake valmis: siirtää tuloksen kirjastoon, `status=done` (tai `failed` + syy).
-5. Päivittää `status.json` (live: per-job %, koko jonon ETA, lämmöt).
-6. **True N-rinnakkaisuus riippumatta siitä miltä levyltä job on** — koska jono on yksi.
-
-Ekstrojen numerointi: per-dest-kansio-lukko (opittu Taso B). Numero lasketaan job-kohtaisesti
-lukon sisällä kirjoitushetkellä (ei jonon rakennusvaiheessa) → ei törmäyksiä rinnakkaisajossa.
-
-Lämpöturva: sama todistettu throttle-mekanismi (koko koneen `kill -STOP`/`-CONT` yli 85°C).
-
-### 3.3 Lähteen siivous (270 GB -ongelman korjaus)
-Job-kohtainen: kun **kaikki saman lähteen (disc) jobit** ovat `done|skipped|broken`, lähde-VOB:it
-poistetaan. Laskenta jonosta (ei per-session-laskurista) → luotettava. Ratkaisee sekä levytilan
-ETTÄ "valmiit listautuvat kehotteessa" -ongelman (jono on totuus, ei VOB:ien olemassaolo).
+- **`scan <dvd_dir>` → JSON tittelilistasta metadatoineen.** Ajaa `timeout $SCAN_TIMEOUT
+  HandBrakeCLI --scan --json` (ja/tai lsdvd). Palauttaa jokaisesta tittelistä:
+  numero, kesto, mitat, dar, fps, format, crop, subs[], audio[]. **Timeout → virhe-JSON
+  (`{"error":"scan_timeout"}`), ei jää roikkumaan.** EI kirjoita jonoa — pelkkä analyysi.
+  (Erottelu `scan` ↔ `enqueue`: käyttöliittymä ajaa scanin, kysyy käyttäjältä luokittelun
+  epävarmoissa, ja kutsuu sitten enqueuen eksplisiittisillä arvoilla.)
+- **`enqueue --source … --title … --kind … --name … [--year …] [--season/--episode] --role …`**
+  → luo `jobs/<id>.json` (idempotentti id:n perusteella). Ottaa metadatan `scan`-tuloksesta
+  (annettuna) — ei probeaa uudelleen. Ekstroille `out_name` lasketaan **per-dest-lukon sisällä**
+  kirjoitushetkellä (numero = olemassa olevat + jonossa olevat + 1), ei etukäteen.
+- **`dispatch`** (pitkäikäinen daemon): toipumis­skannaus (§3), sitten silmukka: lue PARALLEL
+  tuoreena, varaa vapaat slotit `pending`-jobeille (per-dest-lukko + lämpöturva), enkoodaa,
+  verifioi, siirrä kirjastoon, päivitä job + status.json. Lähteen siivous kun disc valmis (§3).
+- **`status [--json]`** → tuottaa status.json:n (tai lukee sen). UI/enkoodaustila.sh käyttää.
+- **`skip <id>`** → `status=user_skip`. **`unskip <id>`** → `pending`.
+- **`retry <id>`** → `failed|broken` → `pending` (edellyttää lähteen olemassaoloa).
+- **`review-problematic`** → listaa `problematic/`.
+- **`cleanup`** → poistaa valmiiden discien lähteet (§3-sääntö) + tyhjät työhakemistot.
+- **`migrate`** → §9.
 
 ---
 
-## 4. Rippaus + metadatan tallennus
+## 6. Rippaus + metadatan tallennus
 
-`rip <levy>` -ydinkomento:
-1. `dvdbackup -M` levyltä työhakemistoon. Tallenna **READ_ERRORS** (levyn kunto).
-2. **Yksi HandBrake `--scan --json`** → kaikki metadata kerralla: jokaisen tittelin kesto,
-   mitat, DAR, fps, format, crop (autocrop), **tekstityskielet**, **äänikielet**.
-3. Tunnista pääelokuva + ekstrat (ks. 4.1).
-4. Kirjoita jokaisesta enkoodattavasta tittelistä **queue.jsonl-rivi täydellä metadatalla.**
-5. Vikatarkistus (ks. 5).
-
-Metadata on siis valmiina jonossa — enkoodaustila.sh / GUI ei koskaan probeaa mitään.
-
-### 4.1 Pääelokuvan / ekstrojen tunnistus (erikoistapaukset)
-- Ensisijaisesti: `MOVIE_TITLE_NUM` metadatasta jos annettu.
-- Muuten: pisin titteli = pääelokuva, muut ekstroja — MUTTA tallenna KAIKKIEN kestot, ja
-  tunnista tapaukset joissa pääelokuva ei ole ensimmäinen (Astronaut's Wife, Tetsuo).
-- Sarjat: useampi pitkä titteli → jaksot (kysytään/konfiguroidaan jaksomäärä), täsmää kesto ↔ jakso.
+`rip <levy_laite>`-vuo (CLI-kerros ohjaa, ydin tekee):
+1. Tarkista levytila-esiehto: **jos `WORK_DIR` vapaa < `RIP_MIN_FREE_GB` TAI rippaamatonta
+   enkoodausvelkaa > `RIP_AHEAD_MAX` jobia → älä rippaa, ilmoita.** (Estää WORK_DIR:n täyttymisen
+   kun rippaus juoksee enkoodauksen edelle.)
+2. `dvdbackup -M` levyltä → `disc-NNN/`. Tallenna dvdbackupin/dmesgin **READ_ERRORS**.
+3. `scan` (timeout-wrapattu). Timeout tai READ_ERRORS > `READ_ERROR_MAX` → koko levy tai
+   yksittäiset tittelit `problematic/` (status `broken`), ei jonoon.
+4. Käyttöliittymä esittää tittelit + metadatan, käyttäjä vahvistaa luokittelun (movie/series/…,
+   nimi, vuosi, pää/ekstra) — **erityisesti kun `confidence=low`** (§7). Ydin ei arvaa.
+5. `enqueue` jokaisesta enkoodattavasta tittelistä täydellä metadatalla.
 
 ---
 
-## 5. Vikojen tunnistus + ongelmalliset sivuun (`problematic.jsonl`)
+## 7. Pääelokuvan / ekstrojen tunnistus
 
-**Rikkinäisiä EI yritetä enkoodata.** Rippaus-/skannausvaiheessa tunnistetaan:
-- `READ_ERRORS > kynnys` (levyvaurio, esim. District 9, 2012).
-- Titteli jota HandBrake ei löydä / skannaus jumittaa (American Beauty).
-- (Enkoodauksen jälkeen) rc≠0 tai tuotos liian pieni (<1MB) → merkitse `failed`.
-
-Nämä → `problematic.jsonl` (id, teos, levy, syy, aikaleima, status). **Ei koskaan
-automaattista uusintayritystä.** Ydinkomento `review-problematic` listaa, `retry <id>` yrittää
-uudelleen (esim. ddrescuen jälkeen). Tämä on se **ajantasainen lista** jota käyttäjä vaati.
-
----
-
-## 6. Tila + edistyminen (status + GUI-syöte)
-
-Dispatcher kirjoittaa `WORK_DIR/state/status.json`:
-```json
-{"updated":"…","parallel":2,"encoding":[
-   {"id":"…","name":"Fargo","pct":42.1,"eta_s":1830,"fps":31.2,"slot":1}],
- "queue_pending":57,"queue_total_eta_s":41000,"temps":[55,58,54,56],"disk_free_gb":80}
-```
-- `enkoodaustila.sh` (CLI) renderöi tämän.
-- Tuleva **GUI** lukee saman → reaaliaikainen näkymä ilman muutoksia ytimeen.
-- Per-job ETA lasketaan tallennetusta `duration`sta / mitatusta HandBrake-nopeudesta (fps).
+- Jos käyttäjä/metadata antaa eksplisiittisen pää­titteli­numeron → käytä sitä (`confidence=high`).
+- Muuten heuristiikka (pisin = pää) tuottaa **ehdotuksen + `confidence`-lipun ja vaihtoehtoiset
+  tittelit** jobiin. Kun useampi pitkä titteli tai epäselvä rakenne → `confidence=low`, ja
+  käyttöliittymä **pyytää vahvistuksen ennen enqueueta.** Ydin ei koskaan hiljaa arvaa
+  epävarmassa tapauksessa. (Estää väärintunnistuksen kun outo levy tulee.)
+- Sarjat: useampi pitkä titteli → jaksot; jakso ↔ titteli täsmätään kestolla, käyttäjä
+  vahvistaa jakso­numeroinnin.
 
 ---
 
-## 7. Migraatio nykyisestä (backlogin jatkuvuus + 270 GB siivous)
+## 8. Dispatcher yksityiskohdat
 
-Kertaluontoinen `migrate`-komento:
-1. Käy läpi `session_*/.queue`-rivit → luo queue.jsonl-entryt.
-2. Merkitse `done` ne joiden tulos on jo kirjastossa (dest-tarkistus) tai joiden lähde on siivottu.
-3. Kirjoita metadata mitä saa (probe kerran migraatiossa; uudet rippaukset saavat sen suoraan).
-4. Tunnista 14 sessiota joilla lähde-VOB:it (270 GB): jos jonon mukaan done → **siivoa lähteet**
-   (vapauttaa ~270 GB), muuten jätä ja lisää pending-jobeina uuteen jonoon.
-5. Vanhat session-hakemistot voidaan poistaa migraation jälkeen.
-
-Migraatio ajetaan vasta kun uusi järjestelmä on testattu, EI kesken nykyistä rippausta.
-
----
-
-## 8. Robustius + testaussuunnitelma (ennen tuotantoa)
-
-Opittu: **ei luoteta testaamattomaan koodiin.** Ennen mitään tuotantokäyttöä:
-1. `bash -n` + shellcheck.
-2. **Eristetyt yksikkötestit** stub-HandBrakella (`sleep N; return 0/1`): dispatcher poimii oikein,
-   N-rinnakkaisuus tasan N, per-dest-lukko estää törmäyksen, lähteen siivous laukeaa täsmälleen
-   kerran per lähde kun kaikki sen jobit valmiit (ei koskaan liian aikaisin → ei datamenetystä).
-3. **Sisältö-/kattavuustarkistukset** (opittu Easy Rider/Tetsuo): valmis tulos verifioidaan
-   (video/ääni säilyneet, kesto järkevä) ENNEN kirjastoon kirjoittamista.
-4. **Atominen deploy** (temp+mv), ei koskaan käynnissä olevan prosessin päälle.
-5. Pieni oikea päästä-päähän-testi (1-2 levyä) ennen migraatiota.
+- **Slotit:** `PARALLEL` kpl `slots/slot-N.lock`. Luettu tuoreena joka varauskierroksella.
+- **Per-dest-lukko:** ennen ekstran `out_name`-laskentaa flock `locks/<sha1(dest_dir)>.lock`;
+  numero lasketaan lukon sisällä; vapauta kirjoituksen jälkeen. Estää kahden rinnakkaisen jobin
+  saman numeron.
+- **Lämpöturva (määritelty per kynnys):**
+  - **`TEMP_WARN` (esim. 85°C):** dispatcher lähettää `kill -STOP` **enkooderiprosessiryhmälle**
+    (ei koko koneelle; dispatcher itse jää ajoon), `kill -CONT` kun lämpö laskee alle rajan.
+    Palautuva, työtä ei menetetä.
+  - **`TEMP_KILL` (esim. 95°C):** hätäsammutus — `kill` enkooderit, ja **kyseiset jobit
+    palautetaan `pending`:iksi** (ei `failed`), keskeneräiset temp-tulokset poistetaan. Työ
+    yritetään uudelleen kun lämpö sallii. Lämpötila ei koskaan merkitse jobia pysyvästi rikki.
+- **Verifiointi ennen kirjastoon kirjoitusta:** valmis tulos tarkistetaan: video- ja ääniraidat
+  läsnä, kesto ~ `duration_s`, tekstitysten kattavuus järkevä. Hylkäys → `failed`, kirjastoa ei
+  kosketa.
+- **Atominen kirjaston korvaus:** kirjoita temp kohdekansioon, `mv` atomisesti; vanhan
+  mahdollisen korvattavan versio varmuuskopioidaan **kirjaston ULKOPUOLELLE** (ettei mediapalvelin
+  indeksoi sitä).
 
 ---
 
-## 9. Rakenne (tiedostot)
+## 9. Migraatio vanhasta järjestelmästä + turvallinen tilan­vapautus
 
-```
-rip-core.sh          # ydin: komennot rip/enqueue/dispatch/status/skip/retry/config/migrate
-                     #   — EI interaktiivisia promptteja, kaikki tila JSONina
-rip                  # ohut CLI (kutsuu rip-core.sh:ta, hoitaa levynvaihtokehotteet)
-enkoodaustila.sh     # (on jo) lukee status.json / queue.jsonl
-~/.config/rip-dvd/config
-WORK_DIR/state/queue.jsonl, status.json, problematic.jsonl
-```
-GUI (myöhemmin) = erillinen projekti joka kutsuu `rip-core.sh <komento>` ja lukee state/-JSONit.
-
----
-
-## 10. Toteutusjärjestys (vaiheittain, kukin testataan erikseen)
-
-1. **Konfiguraatio + tilamalli** (config, queue.jsonl-skeema, luku/kirjoitusfunktiot).
-2. **Rip + metadatan tallennus** (dvdbackup + scan → queue-entryt täydellä metadatalla + vikatunnistus).
-3. **Dispatcher** (globaali jono, N-slotti, per-dest-lukko, lämpöturva, lähteen siivous) — eristetyt
-   testit stub-HandBrakella ENNEN oikeaa.
-4. **status.json + enkoodaustila.sh -integraatio.**
-5. **Migraatio** vanhasta + 270 GB siivous.
-6. **CLI-kuori** (levynvaihto, käyttäjän valinnat) ohuena ytimen päälle.
-7. (Myöhemmin) **GUI** state-JSONien + ydinkomentojen päälle.
+`migrate` (kertaluontoinen, ajetaan vasta kun uusi testattu):
+1. Tuo vanhat jonorivit → `enqueue` uusiksi jobeiksi (metadata: probe kerran migraatiossa).
+2. Merkitse `done` vain ne joiden **dest-tiedosto läpäisee sisältöverifioinnin** (video+ääni
+   läsnä, kesto ~ tallennettu) — **ei koskaan pelkän olemassaolon perusteella.** Katkennut/
+   korruptoitunut dest → jää `pending`, ei `done`.
+3. Muut → `pending`-jobeja uuteen jonoon (lähde säilyy).
+4. **Lähteen (VOB) poisto vain niille disceille joiden KAIKKI jobit ovat `done` (verifioitu) tai
+   `user_skip`.** Tämä on ainoa oikea tapa vapauttaa iso määrä levytilaa turvallisesti.
+5. Vanhat rakenteet poistetaan vasta kun migraatio on todettu oikeaksi.
 
 ---
 
-## Yhteenveto
+## 10. Tiedostonimet, lainaus, GUI-syöte
 
-Tämä korvaa per-session-mallin **yhdellä globaalilla jonolla** (rinnakkaisuus toimii aidosti),
-tallentaa **kaiken metadatan valmiiksi**, **siirtää viat sivuun** ajantasaiselle listalle, tekee
-**laadun ja kansiot konfiguroitaviksi**, siivoaa **270 GB** roskaa, ja erottaa **ytimen
-käyttöliittymästä** niin että GUI voidaan rakentaa myöhemmin koskematta logiikkaan. Kaikki
-tämän session opit (testaamattomaan ei luoteta, atominen deploy, sisältötarkistus, ei
-kovakoodattuja arvoja, ei stale-prosesseja) on rakennettu sisään.
+- **Erikoismerkit** (heittomerkki, sulut, välit, ääkköset nimissä ja poluissa): kaikki muuttujat
+  lainataan aina (`"$var"`), jq:lle `--arg`/`-r`, ei koskaan lainaamatonta interpolointia →
+  ei rikkoutumista eikä injektiota. Testitapaukset: `Astronaut's Wife`, `Fargo (1996)`.
+- **Atomisuus:** `status.json` ja jokainen `jobs/<id>.json`/`problematic/<id>.json` kirjoitetaan
+  aina temp-tiedostoon samaan hakemistoon + `mv` (sama tiedostojärjestelmä → atominen rename).
+  Lukija ei koskaan näe puolikasta.
+- **GUI-valmius:** GUI (erillinen projekti) lukee `status.json` + `jobs/*.json` +
+  `problematic/*.json` ja kutsuu ydinkomentoja (`scan/enqueue/skip/retry/config/dispatch`).
+  Ei muutoksia ytimeen. Aikaleimat ISO-8601 UTC (`Z`).
+
+---
+
+## 11. Testaus ennen tuotantoa (pakollinen)
+
+1. `bash -n` + `shellcheck` kaikille.
+2. **Rinnakkaisuustestit stub-enkooderilla** (`sleep N; return 0/1`, ei oikeaa HandBrakea):
+   - N+1 jobia N slotille → tasan N `encoding` kerrallaan.
+   - **Jonon rinnakkaiskirjoitus:** monta jobia valmistuu + `enqueue` lisää samaan aikaan →
+     yksikään job-tiedosto ei korruptoidu, yksikään päivitys ei katoa (per-job-mallin verifiointi).
+   - **Kaatumistoipuminen:** tapa dispatcher kesken `encoding`-jobin → uudelleenkäynnistys
+     palauttaa jobin `pending`:iksi, ei jää ikuiseen `encoding`-tilaan, slotti ei vuoda.
+   - **Per-dest-lukko:** kaksi rinnakkaista ekstra-jobia samaan kansioon → eri numerot.
+   - **Lähteen siivous täsmälleen kerran:** laukeaa vasta kun kaikki discen jobit `done/user_skip`,
+     ei koskaan `pending/encoding/failed/broken` läsnä ollessa.
+3. **Sisältöverifioinnin testit:** tyhjä/vajaa/katkennut tulos hylätään ennen kirjastoa; migraation
+   `done`-merkintä vaatii verifioinnin.
+4. **Lämpökäytös:** simuloitu WARN → STOP/CONT palautuu; KILL → job `pending`, ei `failed`.
+5. Vasta läpäisyn jälkeen pieni oikea päästä-päähän-testi (1–2 levyä), sitten migraatio.
+
+---
+
+## 12. Yhteenveto vaatimuksista (tarkistuslista toteuttajalle)
+
+- [ ] Ydin ei kysy mitään; kaikki tila JSONina, atomisesti (temp+mv).
+- [ ] Per-job-tiedostot (ei yhtä mutable-jonotiedostoa) → ei rinnakkaiskirjoituksen kilpajuoksua.
+- [ ] Yksi globaali jono; N-rinnakkaisuus yli levyrajojen; PARALLEL luettu tuoreena.
+- [ ] Metadata (kesto, mitat, dar, fps, format, crop, subs, audio, read_errors) tallennettu
+      rippausvaiheessa jokaiseen jobiin.
+- [ ] `broken` ≠ `user_skip` ≠ `failed`; lähteen siivous vain `done`/`user_skip`.
+- [ ] Dispatcherin kaatumistoipuminen (encoding→pending kuolleille).
+- [ ] Scan timeout-wrapattu; timeout/READ_ERRORS>max → problematic, ei hangi/enkoodausyritys.
+- [ ] Lämpö per kynnys määritelty; KILL palauttaa jobin pending, ei failed.
+- [ ] Rippaus estyy jos WORK_DIR täynnä / rip-ahead-raja ylitetty.
+- [ ] scan ↔ enqueue erillään; epävarma pääelokuva → confidence=low → UI vahvistaa.
+- [ ] Kaikki asetukset configissa (kansiot, CRF, kynnykset), ei kovakoodattuja; ei inline-kommentteja.
+- [ ] Nimien erikoismerkit lainattu kaikkialla; deterministinen uniikki id.
+- [ ] Migraation lähteen poisto vaatii sisältöverifioinnin (ei pelkkä olemassaolo).
+- [ ] Testit §11 läpäisty ennen tuotantoa.
+
+---
+
+Tämä spesifikaatio on itsenäinen: se ei edellytä vanhan koodin tuntemusta ja kelpaa sellaisenaan
+uuden toteutuksen pohjaksi. Kaikki tarkastuksessa nousseet 13 riskiä on ratkaistu (per-job-tila,
+broken≠skip, verifioitu siivous, kaatumistoipuminen, scan-timeout, lämpökynnykset, rip-ahead-raja,
+scan/enqueue-erottelu, epävarmuuslippu, config-parsinta, nimien lainaus, atominen status/problematic,
+puuttuvat kynnykset ja id-generointi).
