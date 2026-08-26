@@ -740,13 +740,16 @@ _session_pending_discs() {
 # muuntaa). Tämä tutkiminen kestää yleensä 5–15 sekuntia per levy.
 hb_scan_long_titles() {
     local dvd_dir="$1"
+    local info_file="${2:-}"   # valinnainen: kirjoita "titteli<TAB>kesto_s" tähän (enkoodausarvioita varten)
     # --no-dvdnav: sama kirjastovalinta kuin run_hb():ssa (ks. sen kommentti) —
     # skannaus ja enkoodaus käyttävät aina samaa DVD-lukukirjastoa keskenään,
     # ettei niiden tulkinta levyn rakenteesta pääse eroamaan toisistaan.
     timeout "$SCAN_TIMEOUT" HandBrakeCLI -i "$dvd_dir" -t 0 --scan --no-dvdnav </dev/null 2>&1 | python3 -c "
 import sys, re
 min_dur = $MIN_DURATION
+info_path = r'''$info_file'''
 cur = None
+rows = []
 for line in sys.stdin.buffer:
     line = line.decode('utf-8', errors='replace')
     m = re.search(r'scan: scanning title (\d+)', line)
@@ -757,8 +760,17 @@ for line in sys.stdin.buffer:
         h,mn,s = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
         dur = h*3600 + mn*60 + s
         if dur >= min_dur:
-            print(cur)
+            print(cur)              # STDOUT ennallaan: pitkien tittelien numerot
+            rows.append((cur, dur))
         cur = None
+# Sivutiedosto (ei vaikuta stdoutiin): titteli<TAB>kesto sekunteina
+if info_path:
+    try:
+        with open(info_path, 'a') as f:
+            for t, d in rows:
+                f.write('%d\t%d\n' % (t, d))
+    except Exception:
+        pass
 "
 }
 
@@ -1370,7 +1382,9 @@ encode_session() {
         # Tämä on toinen skannaus — ensimmäinen tehtiin rippausvaiheessa TITLE_COUNT:lle.
         # Uusi skannaus tehdään jotta saadaan tarkat raita-numerot enkoodausta varten.
         local titles=()
-        while IFS= read -r t; do titles+=("$t"); done < <(hb_scan_long_titles "$dvd_dir")
+        # Tallenna tittelien kestot levyn omaan hakemistoon (.titleinfo) — enkoodaustila.sh
+        # lukee ne per-kohde-arvioita varten. Siivoutuu lähteen mukana kun levy on enkoodattu.
+        while IFS= read -r t; do titles+=("$t"); done < <(hb_scan_long_titles "$dvd_dir" "${dvd_dir%/dvdbackup/*}/.titleinfo")
         (( ${#titles[@]} == 0 )) && { log "VAROITUS: ei enkoodattavia raitoja — ${raw_dir##*/}"; continue; }
 
         # Jaa raidat itse teokseen ja ekstroihin. Kolme tapaa, tärkeysjärjestyksessä:
