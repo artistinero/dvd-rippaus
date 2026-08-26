@@ -75,7 +75,8 @@ write_json_atomic(target, json_producer):
 - `mktemp` (EI `.tmp.$$`) — `$$` ei muutu aliprosesseissa (vain `$BASHPID`) → törmäys ja
   haamutiedostot rebootissa. Uniikki nimi ratkaisee molemmat.
 - `jq`:n rc **ja** epätyhjyys (`-s`) tarkistetaan ennen `mv`:tä → sokeaa `mv tmp target` ei koskaan.
-- `sync -d` tiedostolle ja hakemistolle sisältyy funktioon → jokainen tilakirjoitus on kestävä.
+- **`sync -d` tiedostolle ja `sync` (ilman `-d`) hakemistolle** sisältyy funktioon → jokainen
+  tilakirjoitus on kestävä. (Ei `-d` hakemistolle — A4: hakemiston kestävyys on metadataa.)
 
 ### 2.3 Lukot vain lokaalilla levyllä
 `$STATE/locks/`, `$STATE/slots/` ja daemonin pidfile ovat **aina lokaalilla tiedostojärjestelmällä**
@@ -407,8 +408,8 @@ Validointi on **kaksitasoinen (tarkistuksen kohta 5 — ei saa kaataa lukukoment
   - `PARALLEL` kokonaisluku `1..PARALLEL_MAX`; `PARALLEL_MAX` kokonaisluku `≥1`.
   - `CRF` kokonaisluku sallitulla välillä (esim. `0..51`); `ENCODER` sallitusta joukosta.
   - `TEMP_WARN` < `TEMP_KILL`, molemmat järkevällä välillä (esim. `40..110`).
-  - kaikki `*_GB`, `*_DAYS`, `MIN_DURATION`, `READ_ERROR_MAX`, `SCAN_TIMEOUT`, `LOOP_INTERVAL`
-    ei-negatiivisia kokonaislukuja.
+  - kaikki `*_GB`, `*_DAYS` (ml. `BACKUP_RETENTION_DAYS`, `SCAN_TTL_DAYS`), `MIN_DURATION`,
+    `READ_ERROR_MAX`, `SCAN_TIMEOUT`, `LOOP_INTERVAL` ei-negatiivisia kokonaislukuja.
   - `AUDIO_POLICY`/`SUB_POLICY`/`AUDIO_CODEC`/`DEINTERLACE` sallituista joukoista.
   - `DIR_*` suhteellisia (ei absoluuttisia) — halpa syntaksitarkistus, aina.
   - **(operaatiokohtainen, vain kirjoittajille):** `DEST_ROOT` ja `WORK_DIR` olemassa ja
@@ -631,7 +632,11 @@ oikea, mutta "tekstit synkassa" ei ole koneellisesti todistettavissa ilman katse
   Vanha korvattava → `$BACKUP_DIR` (temp+mv+fsync). Job → `done` (§2.5-järjestys), siirto `jobs/done/`.
 - **Arkistoindeksi (A6):** arkistointihetkellä (siirto `jobs/done/`:iin, myös `user_skip`) **appendaa
   yksi tiivis rivi `jobs/done/index.jsonl`:iin** (`{"id","name","dest","finished","status"}`). Append
-  on halpa (O(1)) ja POSIX-O_APPEND-atominen (kuten §12 todistaa 20 kirjoittajalle). GUI sivuttaa
+  on halpa (O(1)). **Atomisuussopimus (tarkistuksen kohta 2):** rivi kirjoitetaan **yhtenä
+  `write()`-kutsuna** (`printf '%s\n' "$rivi" >> tiedosto`, EI useaa peräkkäistä kirjoitusta samaan
+  fd:hen, jotka voivat lomittua) ja **rivi mahtuu `PIPE_BUF`iin** (≤ 4096 tavua Linuxissa) → POSIX
+  takaa lomittumattoman O_APPENDin. Sama sopimus koskee **`audit.jsonl`ia (§15 B2)**. Jos rivi ei
+  mahtuisi PIPE_BUFiin (ei odotettua näillä kentillä), käytä per-tiedosto-flockia. GUI sivuttaa
   indeksiä eikä koskaan skannaa `jobs/done/*.json`:ia listaukseen — täysi JSON luetaan vain kun rivi
   avataan. Ilman tätä §3:n O(N)-optimointi vain siirtyisi dispatcherilta GUI:lle (~800+ tiedostoa,
   kasvaa ikuisesti). **Reconcile rakentaa indeksin uudelleen** täydellä skannauksella jos se puuttuu/
@@ -697,7 +702,7 @@ eri työt, ei yhdistetä. Karsinta jää käyttäjälle (valinnainen volume-nimi
   **`jobs/done/index.jsonl`** (sivutettu arkistolistaus, EI `jobs/done/*.json`-massaskannaus, A6) +
   `counters.json` + `scans/*` ja kutsuu ydinkomentoja. `rev`-kenttä (§2.6) tekee muutokset
   havaittaviksi; **virhekuori (§6.1)** tekee virheistä esitettäviä; **`dispatcher_alive` + `updated`**
-  (§5.2) paljastavat alhaalla olevan daemonin; **`scans/<disc>.json`** (§6.2) tekee scan→vahvistus→
+  (§5.2) paljastavat alhaalla olevan daemonin; **`scans/<sha1(disc_key)>.json`** (§5.5/§6.2) tekee scan→vahvistus→
   enqueue-ketjusta kaatumisen kestävän. Ydin ei kysy mitään, kaikki tila on levyllä → GUI on tilaton
   renderöivä kerros. Ei muutoksia ytimeen.
 - **Skannauksesta rajattavat NAS-hakemistot:** `$DEST_ROOT/.tmp/` (keskeneräiset enkoodaukset) **ja**
@@ -764,7 +769,10 @@ Erikoismerkit (`Astronaut's Wife`, `Fargo (1996)`, ääkköset): kaikki muuttuja
 28. **B3 state_rev:** job-muutos → `state_rev` kasvaa; ei muutosta → ei kasva (GUI voi luottaa).
 29. **A6 arkistoindeksi:** 1000 arkistoitua jobia → GUI-listaus rakentuu `index.jsonl`:stä lukematta
     yhtään `jobs/done/*.json`-tiedostoa.
-30. Vasta läpäisyn jälkeen pieni oikea päästä-päähän-testi, sitten migraatio.
+30. **Append-atomisuus (kohta 2):** N rinnakkaista kirjoittajaa appendaa `index.jsonl`/`audit.jsonl`
+    yksi-`write()`-muodolla → jokainen rivi eheä, ei lomittunutta (todistaa §8.6/§15 B2 -sopimuksen,
+    EI testin 2 kautta joka koskee job-tiedostoja).
+31. Vasta läpäisyn jälkeen pieni oikea päästä-päähän-testi, sitten migraatio.
 
 ---
 
@@ -777,6 +785,7 @@ Erikoismerkit (`Astronaut's Wife`, `Fargo (1996)`, ääkköset): kaikki muuttuja
 - [ ] **jobs/done/index.jsonl: GUI lukee indeksin, ei massaskannaa (A6); reconcile rakentaa uud.**
 - [ ] **§15 B1: cleanup+migrate plan/execute + `--dry-run` (rakenne alusta, ei jälkiasennus).**
 - [ ] **§15 B2: audit.jsonl, rivi ENNEN peruuttamatonta operaatiota.**
+- [ ] **Append-tiedostot (index.jsonl, audit.jsonl): yksi `write()` + PIPE_BUF-mittainen rivi.**
 - [ ] **§15 B3: state_rev (counters.lockissa), GUI ohittaa skannauksen muuttumattomana.**
 - [ ] **§15 B4: verifiointi itsenäinen funktio + `verify`-komento (3 kutsujaa jo nyt).**
 - [ ] **§15 B5: `may_open_slot()` kokoaa 4 ehtoa; `pause`/`resume` (`$STATE/paused`).**
@@ -875,21 +884,29 @@ kaksi tuhoavinta komentoa ja migraatio ajetaan **kerran** 270 GB:n päälle — 
 **B2 — Audit-loki: `$STATE/audit.jsonl` (append-only).** Rivi per peruuttamaton operaatio: aikaleima,
 operaatio, kohde, koko, laukaissut ehto, komento. Kirjoituskohdat: lähteen poisto, kirjaston korvaus,
 `ack-quarantine`, orpo-temppien poisto. **Rivi kirjoitetaan ENNEN operaatiota, ei jälkeen** — jotta
-kesken jäänyt poisto näkyy lokista (mitä oltiin tekemässä). Läpileikkaava: kohdat ovat hajallaan
-§8.6:ssa, ja jälkikäteen lisättynä yksi jää aina lokittamatta — ja se yksi on aina se joka kaivattaisiin.
+kesken jäänyt poisto näkyy lokista (mitä oltiin tekemässä). Append noudattaa **samaa
+yksi-`write()`/PIPE_BUF-atomisuussopimusta kuin `index.jsonl` (§8.6)**. Läpileikkaava: kohdat ovat
+hajallaan §8.6:ssa, ja jälkikäteen lisättynä yksi jää aina lokittamatta — ja se yksi on aina se joka
+kaivattaisiin.
 
-**B3 — `state_rev` status.jsoniin.** Globaali monotoninen laskuri joka kasvaa **jokaisen job-muutoksen
-yhteydessä** (samat kirjoituskohdat kuin `rev`++ §2.6: worker alku, commit, skip, unskip/retry,
-lämpövahti). GUI vertaa yhtä lukua ja **ohittaa koko hakemistoskannauksen kun mikään ei ole muuttunut**.
-Tarvitsee lukon kuten `seqfile`/`counters` — **päivitetään `counters.lock`in sisällä** (laskurit
-muuttuvat samassa hetkessä). Tämä yhteys on päätettävä nyt, koska se on kaikkein huonoin
-jälkiasennettava (kirjoituskohdat olisivat jo hajallaan).
+**B3 — `state_rev` status.jsoniin.** Globaali monotoninen laskuri joka kasvaa **jokaisella `rev`++:lla
+(§2.6), MYÖS kun tilalaskurit eivät muutu** (tarkistuksen kohta 4). Esim. `skip_requested=true` tai
+`thermal_kill=true` eivät siirrä yhtään `counters.json`-lukua, mutta ovat job-muutoksia jotka GUI:n on
+havaittava — jos `state_rev` kasvaisi vain laskurin muuttuessa, koko lupaus ("ohita skannaus kun mikään
+ei ole muuttunut") pettäisi hiljaa näissä. **`counters.lock` on vain `state_rev`in serialisointipaikka,
+EI ehto sen kasvulle.** GUI vertaa yhtä lukua ja ohittaa hakemistoskannauksen kun se ei ole muuttunut.
+Tämä yhteys on päätettävä nyt, koska se on kaikkein huonoin jälkiasennettava (kirjoituskohdat olisivat
+jo hajallaan §2.6:n viidessä paikassa).
 
 **B4 — Verifiointi (§8.4) itsenäisenä funktiona + `verify`-komento.** Funktio ottaa `(tiedosto,
 odotukset)` → rakenteinen tulos, **ei upotettuna workerin commit-polkuun**. Sama funktio palvelee jo
 nyt kolmea kutsujaa: worker-commit, `cleanup`-recheck (§8.6/§14 R1), migraation `done`-päätös (§9).
 Sen päälle **`verify [<id>|--all]`** jolla kirjaston voi tarkistaa jälkikäteen (käyttäjä poisti
-tiedoston käsin, NAS korruptoitui, `done` ei enää vastaa todellisuutta).
+tiedoston käsin, NAS korruptoitui, `done` ei enää vastaa todellisuutta). **`--all` on raskas
+(800+ kohdetta × `ffprobe` NAS:illa, kilpailee enkoodausten I/O:sta, tarkistuksen kohta 5):** se on
+tarkoitettu ajettavaksi **jonon ollessa tyhjä**, ja se noudattaa kohteliaisuusehtoa — rajattu
+rinnakkaisuus ja tauko jos enkoodauksia on käynnissä (samaan tapaan kuin `may_open_slot()` väistää
+kuormaa). Ei aja täyttä kirjastoa täydellä teholla kesken enkoodausjonon.
 
 **B5 — Yksi predikaatti `may_open_slot()` + `pause`/`resume`.** Slotin avaamisen ehdot (§8.1 levytila
 WORK+DEST, §8.2 lämpöheartbeat, PARALLEL-katto) kootaan **yhdeksi predikaatiksi**, ja **pause on neljäs
@@ -908,8 +925,8 @@ ovat valmiina ja testattuina ENNEN migraatiota**, koska migraatio on kertaluonto
 eikä toistettavissa. Ainoa aidosti myöhemmäksi siirtyvä osa on **GUI itse** — erillinen kerros, ei
 ytimen ominaisuus.
 
-Tämä spesifikaatio on itsenäinen eikä edellytä vanhan koodin tuntemusta. **Seitsemän tarkastuskierrosta
-(13 + 20 + 10 + 14 + 10 + 9 + 6 riskiä + GUI-aukot + läpileikkaavat §15) on integroitu sopimuksiksi.**
+Tämä spesifikaatio on itsenäinen eikä edellytä vanhan koodin tuntemusta. **Kahdeksan tarkastuskierrosta
+(13 + 20 + 10 + 14 + 10 + 9 + 6 + 6 riskiä + GUI-aukot + läpileikkaavat §15) on integroitu sopimuksiksi.**
 En väitä että "kaikki riskit on ratkaistu" — tunnistetut korjattavat kohdat on korjattu, ja loput ovat
 §14:n (R1–R8) tietoisia, dokumentoituja rajauksia. Seitsemännen kierroksen aito korrektiusriski oli
 **`--force` joka olisi voinut kumota `rev`-reconcilen — nyt `rev` on globaalisti monotoninen (§2.6 A1)**;
