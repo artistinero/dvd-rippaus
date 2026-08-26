@@ -33,11 +33,23 @@ for es in $(tmux ls 2>/dev/null | grep '^enc' | cut -d: -f1); do
   echo "        $pct valmis,  jäljellä n. ${eta:-?}"
   [ -n "$keta" ] && echo "    Koko erän loppuun: $keta"
 
-  # tulevat kohteet: queue-rivit sijainnin jälkeen (järjestyksessä = luotettava)
+  # tulevat kohteet: queue-rivit sijainnin jälkeen (järjestyksessä = luotettava).
+  # Kesto luetaan levyn .titleinfo:sta jos on (uudet rippaukset); muuten vain nimi.
   curpos=$(echo "$pos" | cut -d/ -f1); tot=$(echo "$pos" | cut -d/ -f2)
   if [ -n "$curpos" ] && [ -f "$q" ]; then
-    echo "    Seuraavaksi jonossa:"
-    awk -F"$FS" -v s="$((curpos+1))" 'NR>=s{n=$2; sub(/\.mkv$/,"",n); print "        "NR-s+1". "n}' "$q" | head -15
+    echo "    Seuraavaksi jonossa (video-kesto jos tallessa):"
+    awk -F"$FS" -v s="$((curpos+1))" 'NR>=s{print $1"\t"$2"\t"$6}' "$q" | head -15 | \
+    while IFS=$'\t' read -r src name title; do
+      nm=${name%.mkv}
+      ti="${src%/dvdbackup/*}/.titleinfo"
+      dur=""
+      [ -f "$ti" ] && dur=$(awk -v t="$title" '$1==t{print $2; exit}' "$ti" 2>/dev/null)
+      if [ -n "$dur" ] && [ "$dur" -gt 0 ] 2>/dev/null; then
+        printf "        • %-44s %3d min\n" "$nm" "$((dur/60))"
+      else
+        printf "        • %s\n" "$nm"
+      fi
+    done
     left=$(( tot - curpos ))
     [ "$left" -gt 15 ] && echo "        … (+$((left-15)) muuta)"
   fi
