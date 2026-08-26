@@ -492,6 +492,8 @@ virhe on vapaamuotoista tekstiä stderrissä.
   peruuttamaton ja **estää retryn** pysyvästi. Käyttäjän eksplisiittinen päätös (§4/§7/§14).
 - **`verify [<id>|--all]`** → aja §8.4:n itsenäinen verifiointifunktio jälkikäteen kirjastolle
   (§15 B4); palauttaa rakenteisen tuloksen per tiedosto. Ei muuta tilaa ellei erikseen pyydetä.
+  **`--all` on raskas** (800+ × `ffprobe` NAS:ia vasten, kilpailee enkoodausten I/O:sta) → **tarkoitettu
+  ajettavaksi jonon ollessa tyhjä tai `pause`n aikana** (kohteliaisuusehto, §15 B4).
 - **`cleanup [--dry-run]`** → §8.6 (plan/execute, §15 B1). `--dry-run` tulostaa suunnitelman koskematta.
 - **`migrate [--dry-run]`** → §9 (plan/execute, §15 B1).
 - **`pause`** / **`resume`** → §15 B5 (lippu `$STATE/paused`): ei uusia slotteja / normaali.
