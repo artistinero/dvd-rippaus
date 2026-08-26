@@ -59,15 +59,20 @@ kestävyystakuu (§2.5) ei koskaan jää pois `done`-kirjoituksesta unohduksen t
 write_json_atomic(target, json_producer):
   dir=$(dirname target); tmp=$(mktemp "$dir/.tmp.XXXXXX")   # mktemp: uniikki myös rinnakkaisille aliprosesseille
   if json_producer >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
-      fsync "$tmp"; mv -f "$tmp" "$target"; fsync "$dir"     # data + rename pysyvästi levylle
+      sync -d "$tmp"; mv -f "$tmp" "$target"; sync -d "$dir" # data + rename pysyvästi levylle
   else
       rm -f "$tmp"; return 1   # jq-virhe / levy täynnä → target koskematon
   fi
 ```
+- **`sync -d` (EI `fsync`)** — Ubuntussa ei ole `fsync`-binääriä (`command not found`); coreutilsin
+  **`sync -d TIEDOSTO`** synkronoi datan+metadatan yhdelle tiedostolle ja toimii myös hakemistolle.
+  Vaihtoehto: `python3 -c 'import os,sys;fd=os.open(sys.argv[1],os.O_RDONLY);os.fsync(fd)' PATH`
+  (python3 on jo riippuvuuslistalla). **Koko kestävyystakuu (§2.5) nojaa tähän komentoon**, joten se
+  on kirjattu komennon tarkkuudella — ei pseudokoodi-`fsync`iä.
 - `mktemp` (EI `.tmp.$$`) — `$$` ei muutu aliprosesseissa (vain `$BASHPID`) → törmäys ja
   haamutiedostot rebootissa. Uniikki nimi ratkaisee molemmat.
 - `jq`:n rc **ja** epätyhjyys (`-s`) tarkistetaan ennen `mv`:tä → sokeaa `mv tmp target` ei koskaan.
-- `fsync` tiedostolle ja hakemistolle sisältyy funktioon → jokainen tilakirjoitus on kestävä.
+- `sync -d` tiedostolle ja hakemistolle sisältyy funktioon → jokainen tilakirjoitus on kestävä.
 
 ### 2.3 Lukot vain lokaalilla levyllä
 `$STATE/locks/`, `$STATE/slots/` ja daemonin pidfile ovat **aina lokaalilla tiedostojärjestelmällä**
@@ -104,14 +109,14 @@ niin että fs käynnistyy tilaan jossa job on `done` mutta tiedosto puuttuu/on v
 valtuuttaa lähde-VOBien poiston (§4), tämä ei ole hyväksyttävää.**
 
 **Sopimus (peruuttamattomien kirjoitusten kestävyysjärjestys):**
-1. kirjoita `$DEST_ROOT/.tmp/<id>.mkv`, **`fsync`(tiedosto)**,
-2. **`fsync`($DEST_ROOT/.tmp)**,
+1. kirjoita `$DEST_ROOT/.tmp/<id>.mkv`, **`sync -d` (tiedosto)**,
+2. **`sync -d` ($DEST_ROOT/.tmp)**,
 3. `mv` lopulliseen nimeen kohdekansioon,
-4. **`fsync`(dest_dir)** (rename pysyväksi),
-5. **vasta sitten** `done`-tila §2.2:n kanonisella (fsync-sisältävällä) kirjoituksella.
+4. **`sync -d` (dest_dir)** (rename pysyväksi),
+5. **vasta sitten** `done`-tila §2.2:n kanonisella (`sync -d`-sisältävällä) kirjoituksella.
 
 Näin `done` ei koskaan ehdi levylle ennen kohdetiedostoa. Sama järjestys `$BACKUP_DIR`-varmuuskopiolle.
-**NAS-varaus (§14 R1):** jos verkkolevy valehtelee `fsync`in kestävyydestä, viimeinen suoja on
+**NAS-varaus (§14 R1):** jos verkkolevy valehtelee `sync`in kestävyydestä, viimeinen suoja on
 `cleanup`in tuore sisältötarkistus ennen lähteen poistoa (§8.6).
 
 ### 2.6 Per-job-kirjoitussopimus (CAS) — kaikki jobin kirjoittajat, ei vain worker
@@ -132,6 +137,8 @@ JSON-päivityksen ajan. Konkreettiset säännöt:
   (EI suoraan `user_skip`); worker havaitsee commitissa ja keskeyttää siististi → `user_skip`. Näin
   enkoodaus ei koskaan jatku "kummituksena" user_skip-tilan rinnalla.
 - **unskip/retry:** flock → tilasiirtymä sääntöjen mukaan (vaatii lähteen, §4), `rev`++.
+- **lämpövahti:** flock → asettaa `thermal_kill=true` **vain jos status yhä `encoding`** (muuten
+  no-op, §4) → unlock, sitten `kill`. On myös jobin kirjoittaja, ei vain worker/CLI.
 - **rev-kenttä** on monotoninen versionumero jokaisessa jobissa — GUI ja testit voivat havaita
   muutokset; flock takaa serialisoinnin, rev tekee muutokset havaittaviksi.
 
@@ -144,8 +151,9 @@ $STATE/                         (STATE = paikallinen, esim. $WORK_DIR/state)
   jobs/<id>.json                pending / encoding
   problematic/<id>.json         failed / broken   (SIIRRETTY tänne, EI kopio — §4)
   jobs/done/<id>.json           done / user_skip  (arkisto)
-  counters.json                 tilalaskurit {pending,encoding,failed,broken,done,user_skip}
+  counters.json                 tilalaskurit {pending,encoding,failed,broken,done,user_skip,abandoned}
   status.json                   live-yhteenveto (vain dispatcher kirjoittaa)
+  scans/<disc>.json             skannaustulos joka odottaa vahvistusta+enqueueta (GUI-aukko c)
   seqfile                       flock-suojattu monotoninen jonojärjestysnumero (§5.1) — pakollinen
   locks/job-<id>.lock           per-job read-modify-write -lukko (§2.6)
   locks/dest-<sha1(dest)>.lock  per-kohdekansio-lukko (ekstranumerointi)
@@ -161,8 +169,14 @@ $STATE/                         (STATE = paikallinen, esim. $WORK_DIR/state)
 *asuu*. Tilasiirtymä joka ylittää luokkarajan (esim. `pending`→`broken` tai `encoding`→`done`):
 1. kirjoita uuden sijainnin tiedosto (§2.2 guardattu+fsync),
 2. poista vanhan sijainnin tiedosto.
-Kaatuminen näiden välissä → **käynnistyksen reconcile** pitää *terminaalisimman* (prioriteetti
-`jobs/done` > `problematic` > `jobs`) ja poistaa toisen.
+Kaatuminen näiden välissä → **käynnistyksen reconcile** ratkaisee kaksoisrecordin **`rev`-kentän
+perusteella: säilytä suurin `rev`, poista muut.** Hakemistoprioriteetti (`jobs/done` > `problematic`
+> `jobs`) on **vain tasapelin ratkaisija** samalla rev:llä. **Miksi ei pelkkä hakemistoprioriteetti
+(tarkistuksen kohta 1, aito korrektiusbugi):** se olettaisi että siirtymät kulkevat aina kohti
+terminaalia, mutta `retry` (`problematic/`→`jobs/`) ja `unskip` (`jobs/done/`→`jobs/`) kulkevat
+**taaksepäin** ja kasvattavat `rev`:iä (§2.6). Pelkkä prioriteetti pitäisi vanhan `failed`/`user_skip`-
+recordin ja poistaisi juuri luodun `pending`in → käyttäjän komento peruuntuisi ilman merkkiä. `rev`
+on määritelty monotoniseksi juuri tähän: suurin rev = viimeisin tahto.
 
 **counters.json ei saa ajautua pysyvästi eroon (tarkistuksen kohta 6):** hakemistosiirto ja
 `counters.json`-päivitys eivät ole atomisia keskenään — kaatuminen niiden välissä jättäisi luvut
@@ -205,8 +219,14 @@ kyseisen `disc_key`:n lähteen poiston.
 enkooderin, worker näkee vain `rc≠0` — saman signaalin kuin oikeasta epäonnistumisesta. Ilman
 lisätietoa se merkitsisi jobin `failed`:iksi ja lämpötapot valuisivat karanteeniin (§8.2:n lupaus
 "→ pending" ei toteutuisi). **Sopimus: lämpövahti asettaa jobiin `thermal_kill=true` (per-job-flock,
-§2.6) ENNEN `kill`iä.** Worker/reclaim lukee lipun commitissa: `thermal_kill=true` → job `pending`
-(ei `failed`), nollaa lipun, poista temp. Ei nojata pelkkään rc:hen.
+§2.6) ENNEN `kill`iä**, ja tämä kirjoitus on **no-op jos status ei ole `encoding`** (§2.6 —
+estää haamutiedoston jos worker jo commitoi ja siirsi recordin `jobs/done/`:iin).
+
+Worker/reclaim tulkitsee lipun commitissa **vain kun `rc≠0`** (tarkistuksen kohta 6):
+- `rc≠0` JA `thermal_kill=true` → job `pending` (ei `failed`), nollaa lippu, poista temp.
+- **`rc=0` (enkoodaus ehti valmistua lipun kirjoituksen ja killin välissä) → normaali commit,
+  `done`** — kelvollista valmista enkoodausta EI heitetä pois pelkän lipun takia. Lippu nollataan.
+- `rc≠0` ilman lippua → aito `failed`.
 
 **`done`:n vahva määritelmä (koska se valtuuttaa lähteen poiston):** lopullinen kohdetiedosto on
 *olemassa, luettavissa, verifioitu (§8.4), ja sen sekä jobin tila on kestävästi levylle kirjattu*
@@ -292,15 +312,20 @@ näyttöaikaleima.
 
 ### 5.2 Live: `$STATE/status.json` (dispatcher, §2.2)
 ```json
-{"updated":"…Z","parallel":2,
+{"updated":"…Z","parallel":2,"dispatcher_alive":true,
  "encoding":[{"id":"…","name":"Fargo","pct":42.1,"eta_s":1830,"fps":31.2,"slot":1}],
- "pending":57,"encoding_n":2,"done":812,"failed":3,"broken":5,
+ "pending":57,"encoding_n":2,"done":812,"failed":3,"broken":5,"user_skip":12,"abandoned":2,
  "quarantine_gb":41,                                // failed+broken-lähteiden koko (§7, erillään velasta)
+ "abandoned_gb":8,                                  // kuitattu, odottaa cleanupia (§8.6, ei näkymätön lattia)
  "encode_debt_gb":22,                               // vain pending/encoding-lähteet (rip-ahead-mittari)
  "queue_eta_s":41000,"temps_c":[55,58,54,56],
  "disk_free_work_gb":80,"disk_free_dest_gb":540,"thermal_ok":true}
 ```
-Laskurit `counters.json`:sta (ei `jobs/done/`-skannausta). **pct/fps/eta lähde:** HandBrakeCLI
+Laskurit `counters.json`:sta (ei `jobs/done/`-skannausta) — **kaikki tilat raportoidaan** (myös
+`user_skip`, `abandoned`), jotta GUI voi näyttää ne. **`dispatcher_alive`** = `dispatch.pid`-flockin
+tila (onko daemon pystyssä): ilman sitä GUI näyttäisi vanhaa status.jsonia täysin normaalin näköisenä
+vaikka daemon olisi alhaalla — GUI luottaa lisäksi `updated`-aikaleiman tuoreuteen. **pct/fps/eta
+lähde:** HandBrakeCLI
 `--json`-edistymisvirta (viimeinen `Working`-objekti: `Progress`, `Rate`, `ETASeconds`); jos puuttuu,
 kentät `null` — status ei koskaan kaadu progress-parsintaan.
 
@@ -308,7 +333,11 @@ kentät `null` — status ei koskaan kaadu progress-parsintaan.
 `AVAIN=arvo` per rivi. **Ei rivinsisäisiä kommentteja** (parseri ei poistaisi niitä → arvoon jäisi
 roskaa). Kommentit vain omilla `#`-alkuisilla riveillään. Parsinta: `sed -n 's/^KEY=//p' | head -1`,
 sitten **trailing-whitespace + CR** ankkuroituna perästä (EI ensimmäisestä välilyönnistä, jotta
-`DIR=/mnt/my movies` säilyy): `val="${val%$'\r'}"; val="${val%%+([[:space:]])}"`.
+`DIR=/mnt/my movies` säilyy). **Käytä `sed`-ankkurointia** (ei bash-extglobia):
+`val=$(printf '%s' "$val" | sed 's/[[:space:]]*$//; s/\r$//')`. **Miksi ei `${val%%+([[:space:]])}`
+(tarkistuksen kohta 3):** se vaatii `shopt -s extglob`in — ilman sitä `+(...)` tulkitaan
+kirjaimellisesti eikä strippi tee mitään, jolloin arvoihin (mm. numeerisiin kynnyksiin) jäisi
+välilyöntejä hiljaa. `sed` toimii aina.
 ```
 # --- rinnakkaisuus ja laatu ---
 PARALLEL=2
@@ -349,8 +378,14 @@ Ei `source` (ei suoriteta configin sisältöä koodina).
 
 ### 5.4 Configin validointi ja oletukset (pakollinen — yleisin tuotantovikaluokka, tarkistuksen kohta 1)
 Parsinta ei riitä: puuttuva avain → tyhjä merkkijono → awk-vertailu tyhjällä → määrittelemätön käytös.
-Siksi **jokainen ydinkomento validoi configin käynnistyessään ja KIELTÄYTYY käynnistymästä (rc≠0,
-selkeä virhe) jos jokin on kelvoton** — ei hiljaista jatkoa väärällä arvolla.
+Validointi on **kaksitasoinen (tarkistuksen kohta 5 — ei saa kaataa lukukomentoja):**
+- **Aina pakolliset (kaikki komennot):** tyypit, välit, ristiriidat (alla). Kelvoton → **kieltäytyminen**
+  (rc≠0, virhekuori §6.1) — nämä ovat halpoja eivätkä koske NASia.
+- **Operaatiokohtaiset (vain kirjoittavat komennot):** polkujen (`DEST_ROOT`, `WORK_DIR`) olemassaolo
+  ja kirjoitettavuus — tekevät NAS-statin. Näitä **EI aja luku­komennoille** (`status`,
+  `review-problematic`): jos terastation on hetkellisesti irti, GUI:n on silti voitava lukea
+  diagnoosi (`dispatcher_alive`, viimeisin status) — luku­komento **varoittaa**, ei kieltäydy, eikä
+  tee jumittuvaa NAS-stat-kutsua joka status-kyselyllä.
 
 - **Oletusarvo jokaiselle avaimelle** (koodissa, ei configissa): puuttuva/tyhjä avain → oletus.
   Configin täydellinen puuttuminen → kaikki oletukset (turvallinen minimikäytös: `PARALLEL=1`).
@@ -361,7 +396,9 @@ selkeä virhe) jos jokin on kelvoton** — ei hiljaista jatkoa väärällä arvo
   - kaikki `*_GB`, `*_DAYS`, `MIN_DURATION`, `READ_ERROR_MAX`, `SCAN_TIMEOUT`, `LOOP_INTERVAL`
     ei-negatiivisia kokonaislukuja.
   - `AUDIO_POLICY`/`SUB_POLICY`/`AUDIO_CODEC`/`DEINTERLACE` sallituista joukoista.
-  - `DEST_ROOT` ja `WORK_DIR` olemassa ja kirjoitettavissa; `DIR_*` suhteellisia (ei absoluuttisia).
+  - `DIR_*` suhteellisia (ei absoluuttisia) — halpa syntaksitarkistus, aina.
+  - **(operaatiokohtainen, vain kirjoittajille):** `DEST_ROOT` ja `WORK_DIR` olemassa ja
+    kirjoitettavissa (NAS-stat) — ei lukukomennoille.
 - **Ristiriitatarkistukset:** `RIP_MIN_FREE_GB`/`DEST_MIN_FREE_GB` eivät saa olla suurempia kuin
   vastaavan levyn koko (varoitus); `PARALLEL > PARALLEL_MAX` → kieltäytyminen.
 - Validointi on **yhteinen funktio** jonka jokainen komento kutsuu ensimmäisenä. Virheilmoitus kertoo
@@ -370,6 +407,20 @@ selkeä virhe) jos jokin on kelvoton** — ei hiljaista jatkoa väärällä arvo
 ---
 
 ## 6. Ydinkomennot (ei-interaktiiviset)
+
+### 6.1 Vakio tulos-/virhekuori (GUI-aukko a — suurin yksittäinen GUI-puute)
+Ydin ei tulosta ihmiselle (§1), joten **jokainen komento palauttaa koneluettavan kuoren stdoutiin**
+ja käyttää vakaata virhekoodijoukkoa — GUI ei voi näyttää "PARALLEL=8 ylittää PARALLEL_MAX=4" jos
+virhe on vapaamuotoista tekstiä stderrissä.
+- Onnistuminen: `{"ok":true, ...komennon data...}`
+- Virhe: `{"ok":false,"error":"<vakaa_koodi>","detail":{...}}`, rc≠0.
+  Esim. `{"ok":false,"error":"config_invalid","detail":{"key":"PARALLEL","got":"8","expected":"1..4"}}`.
+- **Vakaa virhekoodijoukko** (laajennettavissa, ei koskaan uudelleenmääriteltävissä): `config_invalid`,
+  `source_missing`, `id_exists`, `id_not_found`, `bad_state` (esim. retry ei-problematic-jobille),
+  `dest_unwritable`, `scan_failed`, `disc_broken`, `lock_timeout`. Ihmisluettava teksti saa mennä
+  stderriin, mutta **totuus GUI:lle on stdoutin kuori**.
+
+### 6.2 Komennot
 
 - **`scan <dvd_dir>`** → JSON tittelilistasta. **Kaksivaiheinen (tarkistuksen kohta 5 — kana–muna:
   per-titteli-scan tarvitsee N:ien luettelon, mutta se saataisiin normaalisti juuri siitä koko levyn
@@ -383,6 +434,14 @@ selkeä virhe) jos jokin on kelvoton** — ei hiljaista jatkoa väärällä arvo
      palautuvat.
   Per titteli: numero, kesto, mitat, dar, fps, format, **interlaced-lippu**, crop, src_subs[],
   src_audio[]. EI kirjoita jonoa.
+  - **Edistyminen (GUI-aukko b):** per-titteli-scan × `SCAN_TIMEOUT` voi kestää minuutteja. `scan`
+    **emittoi JSONL-edistymisrivin per valmistunut titteli** stdoutiin (`{"scan":"…","title":3,
+    "done":3,"total":8}`), jottei GUI:lle näy pelkkä blokkaava tyhjä kutsu.
+  - **Tuloksen pysyvyys (GUI-aukko c):** `scan` **kirjoittaa tuloksen `$STATE/scans/<disc>.json`:iin**
+    (odottaa vahvistusta), ei vain palauta sitä muistiin. `enqueue` lukee sen. Jos GUI suljetaan/
+    kaatuu vahvistuksen aikana, skannausta ei menetetä (muuten levy pitäisi skannata uudelleen
+    minuutteja) — GUI on aidosti tilaton kerros kuten §1 lupaa. `scans/<disc>.json` siivotaan kun
+    kaikki sen tittelit on enqueuattu tai käyttäjä hylkää.
 - **`enqueue --source … --title … --kind … --name … [--year] [--season/--episode] --role … [--force]`**
   → luo `jobs/<id>.json`. Idempotenssi kaikkien kolmen hakemiston yli (§5.1). Johtaa `want_audio`/
   `want_subs` raitapolitiikasta (§8.3). Ekstran `out_name` per-dest-lukossa kirjoitushetkellä.
@@ -455,9 +514,11 @@ Ei dispatch/verify/mv-silmukassa (jottei blokkaava NAS-mv viivästytä pollausta
 kiinteällä välillä, lukee kohteena olevat `pgid`:t `encoding`-jobeista (§5.1):
 - **`TEMP_WARN`:** `kill -STOP` enkooderien **prosessiryhmille** (pgid; ei dispatcher, ei vahti itse),
   `-CONT` kun lämpö laskee. Palautuva. Ryhmä (ei yksittäinen pid), koska HandBrake haarauttaa.
-- **`TEMP_KILL`:** aseta ensin jobiin `thermal_kill=true` (per-job-flock, §2.6), sitten `kill`
-  enkooderit; worker/reclaim lukee lipun → job `pending` (ei failed), nollaa lippu, poista temp.
-  Lämpö ei koskaan merkitse jobia pysyvästi rikki eikä valu karanteeniin (tarkistuksen kohta 2).
+- **`TEMP_KILL`:** aseta ensin jobiin `thermal_kill=true` (per-job-flock, **vain jos status yhä
+  `encoding`** — no-op muuten, §2.6), sitten `kill` enkooderit; worker/reclaim tulkitsee lipun
+  commitissa **vain kun `rc≠0`** → `pending` (ei failed), nollaa lippu, poista temp; `rc=0` (ehti
+  valmistua) → normaali `done` (§4). Lämpö ei koskaan merkitse jobia pysyvästi rikki eikä valu
+  karanteeniin (tarkistuksen kohta 2/6).
 - **STOP-reunatapaukset:** `-STOP` kesken kirjoituksen on turvallista — tulos on aina
   `$DEST_ROOT/.tmp/<id>.mkv` (ei lopullinen nimi); jäädytetty worker ei voi commitoida → puolivalmis
   ei mene `done`:ksi; TEMP_KILL STOP-tilassa → temp vain poistetaan reclaimissa; sammutus STOP-tilassa
@@ -530,12 +591,23 @@ oikea, mutta "tekstit synkassa" ei ole koneellisesti todistettavissa ilman katse
   discen kaikki jobit yhä `done|user_skip|abandoned` (ei muuttunut unskipillä/retryllä), tuore
   sisältötarkistus kohdetiedostolle (§14 R1), vasta sitten poista lähde. `unskip`/`retry` ottavat
   saman lukon.
+- **Kuitattujen (`abandoned`) mittarikatve (tarkistuksen kohta 8):** `ack-quarantine` poistaa levyn
+  `quarantine_gb`:stä heti, mutta VOB:it ovat levyllä kunnes `cleanup` ajetaan — siinä välissä tila
+  olisi näkymätön (ei velassa eikä karanteenissa). Estetään kahdella toisiaan tukevalla keinolla:
+  (1) `abandoned`-lähteet näkyvät omana lukunaan **`abandoned_gb`** (status.json) kunnes siivottu,
+  JA (2) `ack-quarantine` **laukaisee cleanupin kyseiselle `disc_key`:lle** heti (per-disc-lukossa),
+  joten katve on lyhyt ja aina näkyvä. Ei uutta näkymätöntä lattiaa (§7:n koko idea).
 - **Orpo-tempien siivous (tarkistuksen kohta 9):** cleanup pyyhkäisee `$DEST_ROOT/.tmp/*` ja poistaa
   jokaisen tempin **jolle ei löydy vastaavaa `encoding`-jobia** (id ei enää olemassa, id vaihtunut,
   `--force` loi uuden, tai reclaim ei ehtinyt). Ilman tätä NAS:iin jää hiljaa kasvava temp-roska —
   ja koska `DEST_MIN_FREE_GB` on nyt portti kaikelle enkoodaukselle (§8.1), täyttyminen pysäyttäisi
-  koko järjestelmän. Turvaehto: poista vain tempit joita mikään aktiivinen worker ei pidä auki
-  (esim. ei avointa fd:tä / vanhempi kuin nykyiset encoding-jobit).
+  koko järjestelmän. **Yksi KOVA ehto (kaikki AND, ei "tai" — poisto on peruuttamaton, tarkistuksen
+  kohta 7):** poista temp vain jos (1) sille **ei löydy `encoding`-jobia**, JA (2) **mikään prosessi
+  ei pidä sitä auki** (`/proc/*/fd`-skannaus — toimii, worker on lokaali prosessi), JA (3) sen
+  **mtime on turvamarginaalia vanhempi**, JA (4) **cleanup ei koskaan aja ennen kuin
+  boot-reconcile on valmis**. Pelkkä "vanhempi kuin encoding-jobit" -heuristiikka voisi poistaa
+  elävän enkoodauksen tempin erityisesti tapauksessa A (adoptoitu worker) jos cleanup ehtii ennen
+  reconcilea — siksi avoin-fd-ehto on pakollinen, ei vaihtoehtoinen.
 - **Ekstranumerointi (arkisto huomioitu, tarkistuksen kohdat 4 & 6b):** per-dest-lukon sisällä
   numero = **max(kohdekansiossa levyllä olevat ekstraindeksit ∪ KAIKKIEN kolmen hakemiston
   (`jobs/`, `problematic/`, `jobs/done/`) jobien varaamat ekstra-out_namet samaan dest_diriin) + 1**.
@@ -558,7 +630,8 @@ oikea, mutta "tekstit synkassa" ei ole koneellisesti todistettavissa ilman katse
 2. `done` **vain** jos dest-tiedosto **läpäisee §8.4(a) rakenteellisen verifioinnin** (video+
    want_audio-määrä läsnä, kesto ~ tallennettu). **Ei koskaan pelkän olemassaolon perusteella.**
 3. Muut → `pending` (lähde säilyy).
-4. Lähteen VOB-poisto vain disceille joiden kaikki jobit `done` (verifioitu) tai `user_skip`.
+4. Lähteen VOB-poisto vain disceille joiden kaikki jobit `done` (verifioitu), `user_skip` tai
+   `abandoned` — sama invariantti kuin §4/§8.6 (tarkistuksen kohta 4c).
 5. Vanhat rakenteet poistetaan vasta kun migraatio todettu oikeaksi.
 
 **Duplikaatit = eksplisiittinen rajoite, ei ominaisuus (§14 R4):** ehjä dest + olemassa oleva lähde →
@@ -570,8 +643,11 @@ eri työt, ei yhdistetä. Karsinta jää käyttäjälle (valinnainen volume-nimi
 ## 10. GUI-valmius + varmuuskopioiden retention
 
 - **GUI** (erillinen projekti) lukee `status.json` + `jobs/*` + `problematic/*` + `jobs/done/*` +
-  `counters.json` ja kutsuu ydinkomentoja. `rev`-kenttä (§2.6) tekee muutokset havaittaviksi. Ei
-  muutoksia ytimeen.
+  `counters.json` + `scans/*` ja kutsuu ydinkomentoja. `rev`-kenttä (§2.6) tekee muutokset
+  havaittaviksi; **virhekuori (§6.1)** tekee virheistä esitettäviä; **`dispatcher_alive` + `updated`**
+  (§5.2) paljastavat alhaalla olevan daemonin; **`scans/<disc>.json`** (§6.2) tekee scan→vahvistus→
+  enqueue-ketjusta kaatumisen kestävän. Ydin ei kysy mitään, kaikki tila on levyllä → GUI on tilaton
+  renderöivä kerros. Ei muutoksia ytimeen.
 - **Skannauksesta rajattavat NAS-hakemistot:** `$DEST_ROOT/.tmp/` (keskeneräiset enkoodaukset) **ja**
   `$BACKUP_DIR` (vanhat versiot) — molemmat mediapalvelimen ignore-säännöllä pois indeksistä, jotta
   kirjaston kohdekansiot pysyvät puhtaina.
@@ -616,13 +692,32 @@ Erikoismerkit (`Astronaut's Wife`, `Fargo (1996)`, ääkköset): kaikki muuttuja
 16. **abandoned:** ack-quarantine → siivous sallittu, retry estetty; tila näkyy mallissa.
 17. **Ekstranumerointi problematic/:n yli:** failed-ekstra pitää numeronsa, uusi enqueue ei törmää.
 18. **counters-drift:** tapa kesken hakemistosiirron → boot-reconcile korjaa luvut täysin.
-19. **Orpo-temp:** jätä temp ilman jobia → cleanup poistaa; DEST_MIN_FREE ei täyty roskasta.
-20. Vasta läpäisyn jälkeen pieni oikea päästä-päähän-testi, sitten migraatio.
+19. **Orpo-temp:** jätä temp ilman jobia → cleanup poistaa (kova AND-ehto); DEST_MIN_FREE ei täyty.
+20. **Reconcile ei kumoa retryä/unskipiä (tarkistuksen kohta 1, ainoa jäljellä ollut hiljainen
+    datavirhe):** tapa prosessi kesken `retry`n (`problematic/`→`jobs/`) hakemistosiirron →
+    boot-reconcile säilyttää suuremman `rev`:n (uusi `pending`), EI vanhaa `failed`ia. Sama `unskip`ille.
+21. **thermal_kill vs rc=0:** enkoodaus valmistuu lipun ja killin välissä → `done`, ei hukata.
+22. **Config-validointi ei kaada lukukomentoja:** DEST_ROOT irti → `status`/`review-problematic`
+    toimivat (varoittavat), kirjoittavat komennot kieltäytyvät.
+23. **Virhekuori:** kelvoton komento → vakaa `{"ok":false,"error":…}` stdoutiin, rc≠0.
+24. **scan-pysyvyys:** scan → tapa GUI ennen enqueueta → `$STATE/scans/<disc>.json` säilyy, enqueue
+    lukee sen ilman uudelleenskannausta.
+25. Vasta läpäisyn jälkeen pieni oikea päästä-päähän-testi, sitten migraatio.
 
 ---
 
-## 13. Tarkistuslista toteuttajalle (viisi tarkastuskierrosta integroitu; jäännösrajoitteet §14)
+## 13. Tarkistuslista toteuttajalle (kuusi tarkastuskierrosta integroitu; jäännösrajoitteet §14)
 
+- [ ] **Reconcile ratkaisee kaksoisrecordin `rev`:llä (suurin voittaa), EI hakemistoprioriteetilla —
+      muuten retry/unskip kumoutuisi hiljaa (§3, aito korrektiusbugi).**
+- [ ] **Kestävyys: `sync -d` (EI olematon `fsync`-binääri); config-strippi `sed` (EI extglob).**
+- [ ] **`thermal_kill` tulkitaan vain rc≠0:lla; lipun kirjoitus no-op jos status≠encoding.**
+- [ ] **`abandoned` counters-enumissa + status.jsonissa + migraatiossa (ei jäänyt kesken).**
+- [ ] **Config-validointi kaksitasoinen: lukukomennot eivät kaadu NAS-statiin (GUI-ystävällinen).**
+- [ ] **Virhekuori §6.1 (vakaat koodit); status.json `dispatcher_alive`; scan-tulos `scans/`:iin.**
+- [ ] **Orpo-temp: kova AND-ehto (ei avointa fd:tä ∧ mtime ∧ ei jobia ∧ reconcile valmis).**
+- [ ] **ack-quarantine: `abandoned_gb`-luku + laukaisee cleanupin → ei mittarikatvetta.**
+- [ ] **scan kaksivaiheinen (lsdvd-enumerointi → per-titteli-scan) + JSONL-edistyminen.**
 - [ ] **Config-validointi (§5.4): oletukset + tyyppi/väli + kieltäydy käynnistymästä jos kelvoton.**
 - [ ] **Lämpötappo erotettu virheestä: `thermal_kill`-lippu ennen killiä → pending, ei failed.**
 - [ ] **`abandoned`-tila: ack-quarantine varoittaa, sallii siivouksen, estää retryn.**
@@ -690,10 +785,11 @@ tunnettava ne, ettei niitä luulla katetuiksi.
 
 ---
 
-Tämä spesifikaatio on itsenäinen eikä edellytä vanhan koodin tuntemusta. **Viisi tarkastuskierrosta
-(13 + 20 + 10 + 14 + 10 riskiä) on integroitu sopimuksiksi.** En väitä että "kaikki riskit on
-ratkaistu" — tunnistetut korjattavat kohdat on korjattu, ja loput ovat §14:n (R1–R8) tietoisia,
-dokumentoituja rajauksia. Viidennen kierroksen painavimmat olivat **config-validoinnin täydellinen
-puuttuminen (§5.4), lämpötapon erottaminen aidosta virheestä (`thermal_kill`, §8.2) ja
-`ack-quarantine`n peruuttamattomuus omana `abandoned`-tilanaan (§4)** — kaikki kolme rikkoivat
-spec'n omia lupauksia tavalla joka olisi hävittänyt dataa tai retry-mahdollisuuden.
+Tämä spesifikaatio on itsenäinen eikä edellytä vanhan koodin tuntemusta. **Kuusi tarkastuskierrosta
+(13 + 20 + 10 + 14 + 10 + 9 riskiä + GUI-aukot) on integroitu sopimuksiksi.** En väitä että "kaikki
+riskit on ratkaistu" — tunnistetut korjattavat kohdat on korjattu, ja loput ovat §14:n (R1–R8)
+tietoisia, dokumentoituja rajauksia. Kuudennen kierroksen ainoa aito korrektiusbugi oli **reconcilen
+hakemistoprioriteetti joka olisi kumonnut `retry`n/`unskip`in hiljaa — nyt `rev`-pohjainen (§3)**;
+lisäksi kaksi pseudokoodin toteutuskelvottomuutta (`fsync`-binääri, extglob) ja GUI-kerroksen kolme
+aukkoa (virhekuori, scan-edistyminen, scan-tuloksen pysyvyys) on suljettu. Ydin on nyt aidosti
+tilaton GUI:n alusta.
