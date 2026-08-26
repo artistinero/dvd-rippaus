@@ -4,8 +4,9 @@ Itsenäinen spesifikaatio: määrittelee järjestelmän vaatimuksina ja sopimuks
 mihinkään olemassa olevaan koodiin**. Toteuttaja voi rakentaa kokonaan uuden toteutuksen pelkästään
 tämän pohjalta. Kaikki tila-, komento-, tiedosto- ja käsittelysopimukset on määritelty täsmällisesti.
 
-Oletustyökalut: bash + jq + python3 + HandBrakeCLI + dvdbackup + lsdvd + mkvtoolnix + ffprobe.
-Vaihdettavissa kunhan §4 datamalli ja §5 komennot säilyvät.
+Oletustyökalut: bash + jq + python3 + HandBrakeCLI + dvdbackup + lsdvd + mkvtoolnix + ffprobe +
+libdvdnav-pohjainen tekstitysirrotus (ffmpeg `dvdvideo`-demukseri). Vaihdettavissa kunhan §4 datamalli
+ja §5 komennot säilyvät.
 
 ---
 
@@ -23,7 +24,8 @@ jonona** joka enkoodaa N kohdetta rinnakkain riippumatta lähdelevystä.
 4. **Kaikki metadata kerätään ja tallennetaan kerran, rippausvaiheessa.**
 5. **Viat tunnistetaan ja siirretään sivuun.** Rikkinäistä ei koskaan yritetä automaattisesti
    uudelleen; ongelmallisista pidetään ajantasaista listaa.
-6. **Kaikki käyttäjää koskevat arvot (kansiot, laatu, kynnykset, rinnakkaisuus) konfiguroitavia.**
+6. **Kaikki käyttäjää koskevat arvot (kansiot, laatu, kynnykset, rinnakkaisuus, raitapolitiikka)
+   konfiguroitavia.**
 7. **Peruuttamattomat operaatiot (lähteen poisto, kirjaston ylikirjoitus) vaativat aina
    sisältöverifioinnin ennen suoritusta.** Pelkkä olemassaolo ei riitä.
 8. **Mitään ei viedä tuotantoon testaamatta** (§12).
@@ -33,215 +35,268 @@ jonona** joka enkoodaa N kohdetta rinnakkain riippumatta lähdelevystä.
 ## 2. Atomisuus- ja lukitussopimukset (koko robustiuden perusta)
 
 ### 2.1 Atominen kirjoitus — aina samassa tiedostojärjestelmässä
-`mv` on atominen VAIN saman tiedostojärjestelmän sisällä. Eri fs:n välillä se on copy+unlink →
-kaatuminen kesken jättää katkenneen tiedoston. **Siksi temp-tiedosto kirjoitetaan aina samaan
-hakemistoon kuin lopullinen kohde**, ja renametaan siellä.
+`mv` on atominen VAIN saman tiedostojärjestelmän sisällä (myös **hakemistojen välillä** kunhan sama
+fs). Eri fs:n välillä se on copy+unlink → kaatuminen kesken jättää katkenneen tiedoston. **Siksi
+temp-tiedosto kirjoitetaan aina samaan tiedostojärjestelmään kuin lopullinen kohde.**
 
-- **STATE-tiedostot** (`$STATE` lokaalilla levyllä): temp `$STATE/…/.tmp.<id>` → `mv` samassa
-  hakemistossa.
-- **KIRJASTON tiedostot** (NAS, `$DEST_ROOT`): enkoodaa suoraan **kohdehakemistoon**
-  `dest_dir/.tmp.<id>.mkv`, verifioi, sitten `mv dest_dir/.tmp.<id>.mkv dest_dir/out_name` —
-  rename tapahtuu NAS:in **saman fs:n sisällä** → atominen. **EI koskaan mv WORK_DIR→NAS**
-  (eri fs, ei atominen). Sama koskee vanhan version varmuuskopiota (§8.4).
+- **STATE-tiedostot** (`$STATE`, lokaali levy): temp samassa hakemistossa → `mv`.
+- **KIRJASTON tiedostot** (NAS, `$DEST_ROOT`): enkoodaa **erilliseen työhakemistoon
+  `$DEST_ROOT/.tmp/<id>.mkv`** (sama fs kuin kirjasto, mutta **yksi selkeästi skannauksen ulkopuolelle
+  rajattava hakemisto**, EI kohdekansion sisään — ks. kohta 4 alla). Verifioi, sitten
+  `mv "$DEST_ROOT/.tmp/<id>.mkv" "dest_dir/out_name"` — cross-dir-rename **saman fs:n sisällä** →
+  atominen. **EI koskaan mv WORK_DIR→NAS** (eri fs, ei atominen). Sama koskee vanhan version
+  varmuuskopiota `$BACKUP_DIR`:iin.
+- **Miksi ei kohdekansion sisään:** `dest_dir/.tmp.<id>.mkv` olisi kirjaston sisällä koko
+  enkoodauksen ajan, ja kaikki mediapalvelimet eivät ohita pistealkuisia tiedostoja → puolivalmis
+  mkv voisi näkyä indeksoituna. `$DEST_ROOT/.tmp/` on yksi hakemisto joka rajataan mediapalvelimen
+  skannauksesta (esim. Jellyfin "ignore"-sääntö / `.ignore`), jolloin kirjaston kohdekansiot pysyvät
+  puhtaina. Sama syy kuin `$BACKUP_DIR`:ille (§10).
 
-### 2.2 Guardattu JSON-kirjoitus (ettei jq-virhe tuhoa tiedostoa)
-Jokainen JSON-kirjoitus:
+### 2.2 Kanoninen guardattu+kestävä JSON-kirjoitus (YKSI funktio, fsync sisällä)
+**Kaikki** JSON-tilakirjoitukset käyttävät samaa funktiota — ei kahta eri reseptiä. Näin
+kestävyystakuu (§2.5) ei koskaan jää pois `done`-kirjoituksesta unohduksen takia:
 ```
-tmp="$dir/.tmp.$$"; if jq … >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then mv -f "$tmp" "$target";
-else rm -f "$tmp"; <virhe, ei muuteta targettia>; fi
+write_json_atomic(target, json_producer):
+  dir=$(dirname target); tmp=$(mktemp "$dir/.tmp.XXXXXX")   # mktemp: uniikki myös rinnakkaisille aliprosesseille
+  if json_producer >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+      fsync "$tmp"; mv -f "$tmp" "$target"; fsync "$dir"     # data + rename pysyvästi levylle
+  else
+      rm -f "$tmp"; return 1   # jq-virhe / levy täynnä → target koskematon
+  fi
 ```
-`jq`:n rc **ja** epätyhjyys (`-s`) tarkistetaan ennen mv:tä. Levy täynnä / viallinen JSON →
-targetti jää koskemattomaksi. Sokeaa `mv tmp target` ei koskaan tehdä.
+- `mktemp` (EI `.tmp.$$`) — `$$` ei muutu aliprosesseissa (vain `$BASHPID`) → törmäys ja
+  haamutiedostot rebootissa. Uniikki nimi ratkaisee molemmat.
+- `jq`:n rc **ja** epätyhjyys (`-s`) tarkistetaan ennen `mv`:tä → sokeaa `mv tmp target` ei koskaan.
+- `fsync` tiedostolle ja hakemistolle sisältyy funktioon → jokainen tilakirjoitus on kestävä.
 
 ### 2.3 Lukot vain lokaalilla levyllä
 `$STATE/locks/`, `$STATE/slots/` ja daemonin pidfile ovat **aina lokaalilla tiedostojärjestelmällä**
-(ei NAS:illa). Ne vartioivat NAS-kirjoituksia, mutta itse lukot elävät lokaalisti. Kaikki
-kirjoittajaprosessit jakavat saman lokaalin lukkohakemiston.
+(ei NAS:illa). Ne vartioivat NAS-kirjoituksia, mutta itse lukot elävät lokaalisti.
 
-**Perustelu (tarkennettu):** lukot pidetään tarkoituksella lokaalilla fs:llä koska järjestelmä on
+**Perustelu (liennytetty):** lukot pidetään tarkoituksella lokaalilla fs:llä koska järjestelmä on
 **yhden enkoodauskoneen koordinaattori** — se ei halua tehdä NAS:in lukitussemantiikasta toiminnan
-edellytystä. Tämä ei nojaa väitteeseen "NFS/CIFS-flock on aina rikki" (Linuxin `flock` toimii
-NFS:n kanssa tietyissä kokoonpanoissa; CIFS-käytös riippuu kernelistä/protokollasta/mount-optioista)
-— se yksinkertaisesti EI RIIPU siitä. Kaikki koordinaatio tapahtuu lokaalisti, jolloin NAS:in
-lukkokäytös on merkityksetön koko järjestelmän oikeellisuudelle.
+edellytystä. Tämä EI nojaa väitteeseen "NFS/CIFS-flock on aina rikki" (Linuxin `flock` toimii NFS:n
+kanssa tietyissä kokoonpanoissa; CIFS-käytös riippuu kernelistä/protokollasta/mount-optioista) — se
+yksinkertaisesti EI RIIPU siitä. Kaikki koordinaatio tapahtuu lokaalisti, jolloin NAS:in lukkokäytös
+on merkityksetön oikeellisuudelle.
 
-**Advisory-luonne (rajoite, kirjattava):** `flock` on advisory — se takaa konsistenssin **vain
-tätä lock-protokollaa noudattavien prosessien välillä**. Ulkopuolinen prosessi tai käsin tehty
-tiedostomuutos (esim. käyttäjä luo `Episode 4.mkv` samaan aikaan kun järjestelmä varaa numeron 4)
-EI ole lukkojen suojaama. Oletus: NAS-kirjaston kohdekansioita muokkaa vain tämä järjestelmä.
-Ks. §14 rajoite R3.
+**Advisory-luonne (rajoite, §14 R3):** `flock` on advisory — konsistenssi vain **tätä lock-protokollaa
+noudattavien prosessien** välillä. Ulkopuolinen/käsin tehty muutos kohdekansioon (esim. käyttäjä luo
+`Episode 4.mkv` samaan aikaan kun järjestelmä varaa numeron 4) EI ole suojattu. Oletus: kirjastoa
+muokkaa vain tämä järjestelmä.
+
+### 2.4 Numeeriset vertailut ja yksikkömuunnokset — eksplisiittinen sopimus
+Anturit/HandBrake antavat desimaaleja (`58.0`, `42.1`); bashin `[ -gt ]` kaatuu desimaaliin. **Sopimus:
+kaikki numeeriset vertailut awk:lla** (`awk -v a="$x" -v b="$y" 'BEGIN{exit !(a>b)}'`) **tai
+strippaamalla desimaalit ennen `[ ]`** (`${x%%.*}`). Koskee: lämpötila, pct, fps, kesto-toleranssi,
+levytila. Yksikään desimaali ei päädy paljaaseen `[ ]`-lausekkeeseen.
+
+**Yksikkömuunnokset (eksplisiittiset, ei implisiittisiä):** kaikki `*_GB`-konfiguraatiot ovat
+gigatavuja; kaikki mittaus (`du -sb`, `df --output=avail -B1`) on **tavuja**. Vertailu tehdään aina
+tavuissa: `raja_tavua = GB * 1073741824`, ja verrataan mitattuun tavumäärään awk:lla. **Missään ei
+verrata GB-lukua suoraan tavumäärään.** (Ilman muunnosta esim. `RIP_AHEAD_MAX_GB=60` verrattaisiin
+`du -sb`-tavuihin → 60 tavun raja ylittyisi aina, rippaus estyisi pysyvästi.)
 
 ### 2.5 Kestävyys (power-loss durability) — atominen rename ≠ pysyvä levyllä
-`mv` on **atominen** (ei koskaan puolivalmista nimeä), mutta atomisuus ei takaa että data+metadata
-on **pysyvästi levyllä** sähkökatkon sattuessa. Sekvenssi "kirjoita → verifioi → mv → merkitse
-`done`" voi kaatua niin että tiedostojärjestelmä käynnistyy tilaan jossa job on `done` mutta tiedosto
-puuttuu/on vanha. **Koska `done` antaa myöhemmin luvan poistaa lähde-VOBit (§4), tämä ei ole
-hyväksyttävää.**
+`mv` on **atominen** (ei koskaan puolivalmista nimeä), mutta ei takaa että data+metadata on
+**pysyvästi levyllä** sähkökatkossa. Sekvenssi "kirjoita → verifioi → mv → merkitse `done`" voi kaatua
+niin että fs käynnistyy tilaan jossa job on `done` mutta tiedosto puuttuu/on vanha. **Koska `done`
+valtuuttaa lähde-VOBien poiston (§4), tämä ei ole hyväksyttävää.**
 
 **Sopimus (peruuttamattomien kirjoitusten kestävyysjärjestys):**
-1. kirjoita `dest_dir/.tmp.<id>.mkv`, sitten **`fsync`(tiedosto)**,
-2. **`fsync`(dest_dir)** (jotta temp-nimi on pysyvä),
-3. `mv` lopulliseen nimeen,
-4. **`fsync`(dest_dir)** uudelleen (jotta rename on pysyvä),
-5. **vasta tämän jälkeen** kirjoita `done`-tila (itsekin atomisesti+`fsync`, §2.2).
+1. kirjoita `$DEST_ROOT/.tmp/<id>.mkv`, **`fsync`(tiedosto)**,
+2. **`fsync`($DEST_ROOT/.tmp)**,
+3. `mv` lopulliseen nimeen kohdekansioon,
+4. **`fsync`(dest_dir)** (rename pysyväksi),
+5. **vasta sitten** `done`-tila §2.2:n kanonisella (fsync-sisältävällä) kirjoituksella.
 
-Näin `done` ei koskaan ehdi levylle ennen kohdetiedostoa. Sama järjestys koskee `BACKUP_DIR`-
-varmuuskopiota ennen kirjaston korvausta. **NAS-varaus:** verkkolevyllä `fsync`in kestävyystakuu
-riippuu palvelimen/protokollan asetuksista (write-back-välimuisti voi valehdella) — järjestelmä
-tekee `fsync`in aina, mutta jos NAS ei kunnioita sitä, viimeinen suoja on `cleanup`in oma
-sisältöverifiointi ennen lähteen poistoa (§8.5, §14 R1): lähdettä ei poisteta jos kohde ei ole
-sillä hetkellä luettavissa ja verifioitavissa.
+Näin `done` ei koskaan ehdi levylle ennen kohdetiedostoa. Sama järjestys `$BACKUP_DIR`-varmuuskopiolle.
+**NAS-varaus (§14 R1):** jos verkkolevy valehtelee `fsync`in kestävyydestä, viimeinen suoja on
+`cleanup`in tuore sisältötarkistus ennen lähteen poistoa (§8.6).
 
-### 2.4 Numeeriset vertailut (liukuluvut) — eksplisiittinen sopimus
-Anturit ja HandBrake antavat desimaaleja (`58.0`, `42.1`). Bashin `[ -gt ]` kaatuu desimaaliin.
-**Sopimus: kaikki numeeriset vertailut tehdään joko awk:lla** (`awk -v a="$x" -v b="$y"
-'BEGIN{exit !(a>b)}'`) **tai strippaamalla desimaalit ennen `[ ]`-vertailua** (`${x%%.*}`).
-Koskee: lämpötila vs TEMP_WARN/KILL, pct, fps, kesto-toleranssi, levytila. Yksikään numeerinen
-vertailu ei saa antaa desimaalin päätyä paljaaseen `[ ]`-lausekkeeseen.
+### 2.6 Per-job-kirjoitussopimus (CAS) — kaikki jobin kirjoittajat, ei vain worker
+`jobs/`-mallin lupaus "yhtä jobia muuttaa vain omistaja" **ei toteudu ilman valvontaa**, koska myös
+CLI-komennot (`skip`/`unskip`/`retry`) ja dispatcher/worker kirjoittavat samaan jobiin. Ilman lukkoa
+`skip <id>` voisi osua samaan hetkeen kun worker asettaa `encoding` → viimeinen kirjoittaja voittaa,
+job voisi jäädä `user_skip`:iin enkoodauksen jatkuessa — ja `user_skip` valtuuttaa lähteen poiston.
+Tämä on juuri se kilpajuoksuluokka jonka per-job-malli piti poistaa.
+
+**Sopimus:** jokainen jobin tilamuutos tehdään **per-job-flockin** (`$STATE/locks/job-<id>.lock`)
+sisällä lyhyenä read-modify-write-operaationa. Lukkoa EI pidetä koko enkoodauksen ajan — vain itse
+JSON-päivityksen ajan. Konkreettiset säännöt:
+- **Worker alussa:** flock → jos status yhä `pending`, aseta `encoding`+`pid`+`pgid`+`starttime`,
+  `rev`++ → unlock. Enkoodaa (pitkä, ei lukkoa). **Commit:** flock → jos `skip_requested` asetettu
+  (ks. alla) TAI status ei enää `encoding`, keskeytä (poista temp, aseta `user_skip`/reclaim
+  sääntöjen mukaan); muuten aseta `done`/`failed` → unlock.
+- **skip:** flock → jos `pending`: suoraan `user_skip`. Jos `encoding`: aseta `skip_requested=true`
+  (EI suoraan `user_skip`); worker havaitsee commitissa ja keskeyttää siististi → `user_skip`. Näin
+  enkoodaus ei koskaan jatku "kummituksena" user_skip-tilan rinnalla.
+- **unskip/retry:** flock → tilasiirtymä sääntöjen mukaan (vaatii lähteen, §4), `rev`++.
+- **rev-kenttä** on monotoninen versionumero jokaisessa jobissa — GUI ja testit voivat havaita
+  muutokset; flock takaa serialisoinnin, rev tekee muutokset havaittaviksi.
 
 ---
 
-## 3. Tila-arkkitehtuuri: per-job-tiedostot
+## 3. Tila-arkkitehtuuri: per-job-tiedostot (yksi tiedosto per job, sijainti = tilaluokka)
 
 ```
 $STATE/                         (STATE = paikallinen, esim. $WORK_DIR/state)
-  jobs/<id>.json                Aktiiviset/valmistuvat jobit. Yksi tiedosto per työ.
-  jobs/done/<id>.json           Terminaalitilan (done/user_skip) jobit arkistoituna.
-  problematic/<id>.json         Viat (broken/failed pysyvästi). Per-job.
-  status.json                   Live-yhteenveto (vain dispatcher kirjoittaa).
-  seqfile                       flock-suojattu monotoninen jonojärjestysnumero (§5.1) — pakollinen.
-  locks/<sha1(dest)>.lock       per-kohdekansio-lukko (ekstranumerointi).
-  slots/slot-N.lock             rinnakkaisslotit — flock, OS vapauttaa prosessin kuollessa.
-  dispatch.pid                  daemonin single-instance-lukko.
-  thermal.heartbeat             lämpövahdin elossaolo-aikaleima (fail-safe, §8).
+  jobs/<id>.json                pending / encoding
+  problematic/<id>.json         failed / broken   (SIIRRETTY tänne, EI kopio — §4)
+  jobs/done/<id>.json           done / user_skip  (arkisto)
+  counters.json                 tilalaskurit {pending,encoding,failed,broken,done,user_skip}
+  status.json                   live-yhteenveto (vain dispatcher kirjoittaa)
+  seqfile                       flock-suojattu monotoninen jonojärjestysnumero (§5.1) — pakollinen
+  locks/job-<id>.lock           per-job read-modify-write -lukko (§2.6)
+  locks/dest-<sha1(dest)>.lock  per-kohdekansio-lukko (ekstranumerointi)
+  locks/disc-<sha1(key)>.lock   per-disc-lukko (cleanup ↔ unskip/retry, §8.6)
+  locks/counters.lock           counters.json-päivitys
+  slots/slot-N.lock             rinnakkaisslotit (flock; N = 1..PARALLEL_MAX kova katto)
+  dispatch.pid                  daemonin single-instance-lukko
+  thermal.heartbeat             lämpövahdin elossaolo-aikaleima (fail-safe, §8)
 ```
 
-**Miksi per-job-tiedostot:** jobin muutos = yhden pienen tiedoston atominen korvaus (§2.2). Ei
-jaettua muutettavaa jonotiedostoa → ei rinnakkaiskirjoituksen kilpajuoksua, ei "rip lisää samalla
-kun dispatcher kirjoittaa" -korruptiota. Kutakin jobia muuttaa kerrallaan vain sen omistaja
-(luova rip-komento tai varaava dispatcher-slotti).
+**Yksi totuus per job:** jobin record on **täsmälleen yhdessä** hakemistossa, tilaluokan mukaan.
+`problematic/` EI ole kopio `jobs/`:sta (tarkistuksen kohta 14) vaan se paikka jossa failed/broken-job
+*asuu*. Tilasiirtymä joka ylittää luokkarajan (esim. `pending`→`broken` tai `encoding`→`done`):
+1. kirjoita uuden sijainnin tiedosto (§2.2 guardattu+fsync),
+2. poista vanhan sijainnin tiedosto.
+Kaatuminen näiden välissä → **käynnistyksen reconcile** pitää *terminaalisimman* (prioriteetti
+`jobs/done` > `problematic` > `jobs`) ja poistaa toisen.
 
-**Skaalaus (jobs/ ei kasva rajatta):** kun job siirtyy terminaalitilaan (`done`/`user_skip`), se
-**siirretään `jobs/done/`-alihakemistoon**. Dispatcherin O(N)-skannaus (poimi pending, tarkista
-disc-valmius, laske ekstranumero, kirjoita status) kohdistuu vain aktiivisiin `jobs/*.json`:iin,
-ei koko historiaan. `jobs/done/` on arkisto (statukselle/GUI:lle), ei dispatch-silmukan skannauksessa.
+**Miksi per-job-tiedostot:** jobin muutos = yhden pienen tiedoston atominen korvaus (§2.2). Ei jaettua
+muutettavaa jonotiedostoa → ei rinnakkaiskirjoituksen kilpajuoksua.
+
+**Skaalaus:** dispatch-silmukka skannaa vain `jobs/` (pending/encoding + karanteeniin jäävät
+failed/broken jotka se ohittaa halvasti). done/user_skip on arkistoitu `jobs/done/`:iin pois skannista.
+Laskurit luetaan `counters.json`:sta — **status ei koskaan skannaa `jobs/done/`:ia** (muuten
+arkistointi palauttaisi O(N):n takaisin, tarkistuksen kohta 6a).
 
 ---
 
 ## 4. Jobin elinkaari ja tilat
 
-`status`-enum. **Tahallinen ohitus, epäonnistuminen ja lähdevika ovat eri tiloja** (lähteen
-siivouksen kannalta kriittistä):
+| status      | sijainti      | merkitys                                            | lähde saa siivota? |
+|-------------|---------------|-----------------------------------------------------|--------------------|
+| `pending`   | jobs/         | odottaa                                             | ei                 |
+| `encoding`  | jobs/         | worker-slotti enkoodaa                              | ei                 |
+| `done`      | jobs/done/    | ks. vahva määritelmä alla                           | **kyllä**          |
+| `failed`    | problematic/  | enkoodaus epäonnistui (rc≠0 / verifiointi hylkäsi)  | ei (retry voi tarvita) |
+| `broken`    | problematic/  | lähde viallinen (lukuvirhe/scan-hang) — ei yritetty | **ei** (retry tarvitsee lähteen) |
+| `user_skip` | jobs/done/    | käyttäjä päätti ettei tehdä                         | **kyllä**          |
 
-| status      | merkitys                                            | lähde saa siivota? |
-|-------------|-----------------------------------------------------|--------------------|
-| `pending`   | odottaa                                             | ei                 |
-| `encoding`  | dispatcher-slotti enkoodaa                          | ei                 |
-| `done`      | ks. vahva määritelmä alla                           | **kyllä**          |
-| `failed`    | enkoodaus epäonnistui (rc≠0 / verifiointi hylkäsi)  | ei (retry voi tarvita) |
-| `broken`    | lähde viallinen (lukuvirhe/scan-hang) — ei yritetty | **ei** (retry tarvitsee lähteen) |
-| `user_skip` | käyttäjä päätti ettei tehdä                         | **kyllä**          |
-
-**`done`:n vahva määritelmä (koska se valtuuttaa lähteen poiston):** `done` tarkoittaa että
-lopullinen kohdetiedosto on *olemassa, luettavissa, verifioitu (§8), ja sen sekä tiedoston tila on
-kestävästi levylle kirjattu* (§2.5 fsync-järjestys). `done` EI ole pelkkä historiallinen väite
-"joskus valmistui" — `cleanup` (§8.5) tekee lisäksi lähteen poiston hetkellä oman, tuoreen
-sisältötarkistuksen (§14 R1), joten `done` + cleanup-recheck yhdessä muodostavat poiston ehdon,
+**`done`:n vahva määritelmä (koska se valtuuttaa lähteen poiston):** lopullinen kohdetiedosto on
+*olemassa, luettavissa, verifioitu (§8.4), ja sen sekä jobin tila on kestävästi levylle kirjattu*
+(§2.5). `done` EI ole pelkkä historiallinen väite — `cleanup` (§8.6) tekee lähteen poiston hetkellä
+lisäksi oman tuoreen sisältötarkistuksen (§14 R1). `done` + cleanup-recheck yhdessä ovat poiston ehto,
 ei `done` yksin.
 
-**Lähteen (disc) VOB-poisto vain kun KAIKKI saman `disc_key`:n jobit ovat `done` tai
-`user_skip`.** Yksikin `pending/encoding/failed/broken` estää. `retry` (failed/broken) JA `unskip`
+**Lähteen (disc) VOB-poisto vain kun KAIKKI saman `disc_key`:n jobit ovat `done` tai `user_skip`.**
+Yksikin `pending/encoding/failed/broken` estää. `retry` (failed/broken→pending) JA `unskip`
 (user_skip→pending) **molemmat edellyttävät lähteen olemassaoloa** — kumpikin epäonnistuu selkeällä
 virheellä jos lähde on jo siivottu (ei ikuista pending-jumia).
 
 ### Kaatumistoipuminen — worker pitää slot-lukkoa, ei dispatcher
-**Kriittinen omistajuussopimus:** slot-lukkoa (`slots/slot-N.lock`, flock) pitää **enkooderi-
-worker-prosessi itse** koko enkoodauksen ajan (fd auki workerissa), EI vanhempi dispatcher. Worker
-myös **kirjoittaa oman jobinsa tilasiirtymät itse** (`encoding`→`done`/`failed`, §2.2+§2.5) ja
-tallettaa jobiin `pid`+`starttime` heti alkuun. Näin worker on itsenäinen: se saattaa jobin
-loppuun ja commitoi tuloksen vaikka dispatcher kuolisi kesken.
+**Omistajuussopimus:** slot-lukkoa (`slots/slot-N.lock`, flock) pitää **enkooderi-worker-prosessi
+itse** koko enkoodauksen ajan (fd auki workerissa), EI vanhempi dispatcher. Worker myös kirjoittaa
+oman jobinsa tilasiirtymät (§2.6). Näin worker on itsenäinen: se saattaa jobin loppuun ja commitoi
+tuloksen vaikka dispatcher kuolisi kesken (tarkistuksen kohta 1).
 
-Tämä ratkaisee tarkistuksen kohdan 1 (dispatcher kaatuu, enkooderi elää). **Neljä toipumistapausta,
-eksplisiittiset säännöt** — dispatcher käy käynnistyessään (ja jatkuvasti) jokaisen `encoding`-jobin
-läpi ja luokittelee sen slot-lukon + `pid`/`starttime`-parin perusteella:
+**Neljä toipumistapausta** — dispatcher käy käynnistyessään ja jatkuvasti jokaisen `encoding`-jobin
+läpi ja luokittelee sen slot-lukon + `(pid,starttime)`-parin perusteella:
 
 | tilanne | slot-lukko | (pid,starttime) elossa? | toiminta |
 |---------|-----------|--------------------------|----------|
-| **A. dispatcher kuoli, worker elää** | varattu (worker pitää) | kyllä | **älä koske** — worker vie loppuun ja commitoi itse; dispatcher vain adoptoi seurannan (status.json) |
-| **B. worker kuoli, dispatcher eli/elää** | vapaa (OS vapautti) | ei | reclaim: job → `pending`, poista `dest_dir/.tmp.<id>.mkv` |
+| **A. dispatcher kuoli, worker elää** | varattu (worker pitää) | kyllä | **älä koske** — worker commitoi itse; dispatcher vain adoptoi seurannan |
+| **B. worker kuoli, dispatcher elää** | vapaa (OS vapautti) | ei | reclaim: job → `pending`, poista `$DEST_ROOT/.tmp/<id>.mkv` |
 | **C. molemmat kuolivat** | vapaa | ei | sama kuin B |
 | **D. reboot** | kaikki vapaat | ei | kaikki `encoding` → `pending`, temp-tulokset poistetaan |
 
-**Miksi (pid,starttime)-pari eikä paljas PID:** rebootin/uudelleenkäytön yli pelkkä PID valehtelisi
-"elossa". Pari (PID + prosessin käynnistysaika `/proc/<pid>/stat` field 22) tunnistaa saman
-prosessin luotettavasti. **Slot-lukko on ensisijainen totuus** (OS vapauttaa sen deterministisesti
-prosessin kuollessa, myös rebootissa); (pid,starttime) on ristiintarkistus tapausten A/B erottamiseen
-silloin kun slot-lukko sattuu olemaan vapaa mutta job vielä `encoding` (= worker kuoli). Ei nojata
-pelkkään toiseen.
-
-**Orpo-worker (tapaus A jälkinäytös):** kun adoptoitu worker lopulta valmistuu ja commitoi
-jobin `done`:ksi, se on ehtinyt myös vapauttaa slot-lukon — dispatcher havaitsee vapautuneen slotin
-normaalisti seuraavalla kierroksella. Ei erityiskäsittelyä tarvita, koska worker on aina oman
-jobinsa ja slottinsa auktoriteetti.
+**Miksi (pid,starttime) eikä paljas PID:** rebootin/uudelleenkäytön yli pelkkä PID valehtelisi.
+Pari (PID + käynnistysaika `/proc/<pid>/stat` field 22) tunnistaa saman prosessin. **Slot-lukko on
+ensisijainen totuus** (OS vapauttaa deterministisesti); (pid,starttime) erottaa A/B kun slot-lukko
+sattuu vapaaksi mutta job vielä `encoding`.
 
 ---
 
 ## 5. Datamalli
 
-### 5.1 Job: `$STATE/jobs/<id>.json`
-`<id>`: deterministinen `sha1(source_abs + ":" + title)[0:12]`. **Huom tarkka merkitys:** sama
-`source_abs`+titteli tuottaa saman id:n **yhden ripin sisällä**. Saman fyysisen levyn tahaton
-uudelleenrippaus saa eri `disc-NNN`-polun → eri id (tarkoituksella tuore job). Duplikaattilevyn
-tunnistus (jos vahinkorippaus todennäköinen) on erillinen valinnainen tarkistus (esim. levyn
-volume-nimi + kestosummat), ei id:n vastuulla.
+### 5.1 Job: `$STATE/{jobs|problematic|jobs/done}/<id>.json`
+`<id>`: **titteli-job** `sha1(source_abs + ":" + title)[0:12]`. **Levytason** ongelma (koko levy
+luettavissa-kelvoton, ei titteliä → ei title-id:tä, tarkistuksen kohta 14): `id = "disc:"+sha1(disc_key)[0:12]`,
+`title=null`, `status=broken`, `problematic/`:ssa — antaa levytason vialle identiteetin.
+
+**Idempotenssi (tarkistuksen kohta 7):** `enqueue` tarkistaa id:n **kaikista kolmesta hakemistosta**
+(jobs/, problematic/, jobs/done/). Jos id on jo olemassa: oletus **kieltäydy** (rc≠0, ei hiljaista
+päällekirjoitusta); `--force` sallii uudelleenluonnin (nollaa tilan `pending`, säilyttää `seq`:n jos
+on). Sama id ei koskaan päädy kahteen hakemistoon yhtä aikaa.
+
+**Huom id:n tarkka merkitys:** sama `source_abs`+titteli → sama id **yhden ripin sisällä**. Fyysisen
+levyn tahaton uudelleenrippaus saa eri `disc-NNN`-polun → eri id. Duplikaattilevyn tunnistus (§14 R4)
+on erillinen valinnainen tarkistus, ei id:n vastuulla.
 
 ```json
 {
   "id":"9f3a1c2b7e04",
-  "created":"2026-08-26T09:00:00.123456789Z",  // ISO-aikaleima (info/GUI); EI jonojärjestys, ks. seq
   "seq":10427,                                  // flock-suojattu monotoninen jonojärjestys (§5.1)
+  "rev":3,                                       // monotoninen versionumero (§2.6 CAS)
+  "created":"2026-08-26T09:00:00Z",              // ISO-aikaleima (info/GUI); EI jonojärjestys
   "source":"/abs/…/disc-042/VIDEO_TS",
   "disc_key":"/abs/…/disc-042",
   "title":11, "kind":"movie", "role":"main",
   "name":"Fargo", "year":"1996", "season":null, "episode":null,
   "dest_dir":"/abs/…/movies/Fargo (1996)", "out_name":"Fargo.mkv",
   "duration_s":5640, "width":712, "height":408, "dar":"1.86:1", "fps":25, "format":"PAL",
-  "crop":"66:66:2:2", "subs":["fin","swe"], "audio":["eng"], "read_errors":0,
-  "status":"pending", "slot":null, "pid":null, "starttime":null,
-  "quality":21, "encoder":"x265",
-  "started":null, "finished":null, "fail_reason":null,
+  "interlaced":false, "crop":"66:66:2:2",
+  "src_subs":["fin","swe"], "src_audio":["eng","eng-commentary"],
+  "want_subs":["fin","swe"], "want_audio":["eng"],   // raitapolitiikasta johdettu (§8.3)
+  "read_errors":0,
+  "status":"pending", "slot":null, "pid":null, "pgid":null, "starttime":null,
+  "skip_requested":false,
+  "quality":21, "encoder":"x265", "audio_codec":"copy", "deinterlace":"auto",
+  "started":null, "finished":null, "fail_reason":null, "warnings":[],
   "confidence":"high", "alt_main_titles":[]
 }
 ```
-**Jonojärjestys = `seq`, flock-suojatusta `seqfile`:stä** (ei kellonaika). Perustelu (tarkistuksen
-kohta 9): seinäkelloa ei taata monotoniseksi kahden rinnakkaisen `enqueue`-prosessin välillä
-(NTP-korjaus, kellon hyppy, sama nanosekunti eri corella) → aikaleimapohjainen järjestys voi
-poiketa siitä missä järjestyksessä käyttäjä työt aloitti. Siksi `enqueue` ottaa numeron atomisesti:
-`flock seqfile` → lue nykyinen → `+1` → kirjoita (temp+mv+fsync) → vapauta. Tämä on ainoa jaettu
-laskuri koko järjestelmässä ja se on aina lukon takana — **ei koskaan lukitsematonta jaettua
-laskuria**. `created` on pelkkä ISO-aikaleima näyttöä/GUI:ta varten, ei järjestyskenttä.
+**`pgid`** talletetaan jotta lämpövahti tietää minkä prosessiryhmän `-STOP`/`-CONT`aa (tarkistuksen
+kohta 9). **`want_audio`/`want_subs`** ovat raitapolitiikan (§8.3) tulos — verifiointi (§8.4) johtaa
+odotetun raitamäärän NÄISTÄ, ei lähteen raitamäärästä (tarkistuksen kohta 13).
 
-### 5.2 Live: `$STATE/status.json` (dispatcher, temp+mv §2.2)
+**Jonojärjestys = `seq`, flock-suojatusta `seqfile`:stä** (ei kellonaika). `enqueue`: `flock seqfile`
+→ lue → `+1` → kirjoita (§2.2) → vapauta. Ainoa jaettu laskuri, aina lukon takana. `created` on pelkkä
+näyttöaikaleima.
+
+### 5.2 Live: `$STATE/status.json` (dispatcher, §2.2)
 ```json
 {"updated":"…Z","parallel":2,
  "encoding":[{"id":"…","name":"Fargo","pct":42.1,"eta_s":1830,"fps":31.2,"slot":1}],
- "pending":57,"done":812,"failed":3,"broken":5,
- "queue_eta_s":41000,"temps_c":[55,58,54,56],"disk_free_gb":80}
+ "pending":57,"encoding_n":2,"done":812,"failed":3,"broken":5,
+ "quarantine_gb":41,                                // failed+broken-lähteiden koko (§7, erillään velasta)
+ "encode_debt_gb":22,                               // vain pending/encoding-lähteet (rip-ahead-mittari)
+ "queue_eta_s":41000,"temps_c":[55,58,54,56],
+ "disk_free_work_gb":80,"disk_free_dest_gb":540,"thermal_ok":true}
 ```
-**pct/fps/eta lähde:** HandBrakeCLI `--json` -edistymisvirta (rakenteinen JSON stderriin/lokiin),
-josta dispatcher lukee viimeisen `Working`-objektin (`Progress`, `Rate`, `ETASeconds`). Jos
-`--json`-progressia ei ole saatavilla, kentät ovat **best-effort** ja voivat olla `null` — status
-ei koskaan kaadu progress-parsintaan.
+Laskurit `counters.json`:sta (ei `jobs/done/`-skannausta). **pct/fps/eta lähde:** HandBrakeCLI
+`--json`-edistymisvirta (viimeinen `Working`-objekti: `Progress`, `Rate`, `ETASeconds`); jos puuttuu,
+kentät `null` — status ei koskaan kaadu progress-parsintaan.
 
 ### 5.3 Konfiguraatio: `$HOME/.config/rip-dvd/config`
-`AVAIN=arvo` per rivi. **Ei rivinsisäisiä kommentteja.** Parsinta:
-- lue `sed -n 's/^KEY=//p' | head -1`,
-- **strippaa TRAILING-whitespace ja CR** (Windows-editointi): `val="${val%$'\r'}"; val="${val%%*(
-  )}"` — ankkuroitu perästä, EI ensimmäisestä välilyönnistä (jotta `DIR=/mnt/my movies` säilyy).
+`AVAIN=arvo` per rivi. **Ei rivinsisäisiä kommentteja** (parseri ei poistaisi niitä → arvoon jäisi
+roskaa). Kommentit vain omilla `#`-alkuisilla riveillään. Parsinta: `sed -n 's/^KEY=//p' | head -1`,
+sitten **trailing-whitespace + CR** ankkuroituna perästä (EI ensimmäisestä välilyönnistä, jotta
+`DIR=/mnt/my movies` säilyy): `val="${val%$'\r'}"; val="${val%%+([[:space:]])}"`.
 ```
+# --- rinnakkaisuus ja laatu ---
 PARALLEL=2
+PARALLEL_MAX=4
 CRF=21
 ENCODER=x265
+# --- raitapolitiikka (§8.3) ---
+AUDIO_POLICY=original+commentary
+AUDIO_CODEC=copy
+SUB_POLICY=all
+DEINTERLACE=auto
+# --- kansiot ---
 DEST_ROOT=/mnt/terastation/dlna/vids
 DIR_MOVIES=movies
 DIR_SERIES=series
@@ -249,15 +304,21 @@ DIR_DOCS=documentaries
 DIR_MUSIC=music
 DIR_MISC=misc
 WORK_DIR=/home/keitsi/dvd-rip-tmp
-BACKUP_DIR=/mnt/terastation/dlna/desync-backups   # kirjaston ULKOPUOLELLA, ei mediapalvelimen skannauksessa
-BACKUP_RETENTION_DAYS=30                            # vanhat varmuuskopiot siivotaan tämän jälkeen
+# BACKUP_DIR: kirjaston ULKOPUOLELLA, ei mediapalvelimen skannauksessa
+BACKUP_DIR=/mnt/terastation/dlna/desync-backups
+BACKUP_RETENTION_DAYS=30
+# --- lämpö ---
 TEMP_WARN=85
 TEMP_KILL=95
+# --- kynnykset (kaikki *_GB gigatavuja, §2.4) ---
 MIN_DURATION=300
 READ_ERROR_MAX=20
 SCAN_TIMEOUT=600
 RIP_MIN_FREE_GB=40
-RIP_AHEAD_MAX_GB=60                                 # rippaamatonta enkoodausvelkaa tavuissa, ei jobeissa
+DEST_MIN_FREE_GB=20
+# RIP_AHEAD_MAX_GB: rippaamatonta enkoodausVELKAA gigatavuina (vain pending/encoding, §7)
+RIP_AHEAD_MAX_GB=60
+QUARANTINE_MAX_GB=100
 LOOP_INTERVAL=5
 ```
 Ei `source` (ei suoriteta configin sisältöä koodina).
@@ -266,245 +327,269 @@ Ei `source` (ei suoriteta configin sisältöä koodina).
 
 ## 6. Ydinkomennot (ei-interaktiiviset)
 
-- **`scan <dvd_dir>` → JSON tittelilistasta metadatoineen.** Ajaa **per-titteli** timeout-wrapatut
-  skannaukset (`timeout $SCAN_TIMEOUT HandBrakeCLI -i … --title N --scan --json`) tai lsdvd-fallback,
-  **jotta yksi vaurioitunut titteli ei vie kaikkien ehjien metadataa** eikä jumita koko discia.
-  Yksittäisen tittelin timeout → se titteli merkitään scan-tuloksessa `broken`, muut ehjät
-  palautuvat normaalisti. Palauttaa per titteli: numero, kesto, mitat, dar, fps, format, crop,
-  subs[], audio[]. EI kirjoita jonoa.
-- **`enqueue --source … --title … --kind … --name … [--year] [--season/--episode] --role …`** →
-  luo `jobs/<id>.json` (idempotentti id:llä). Ottaa metadatan scan-tuloksesta (annettuna). Ekstran
-  `out_name` lasketaan **per-dest-lukon sisällä** kirjoitushetkellä.
+- **`scan <dvd_dir>`** → JSON tittelilistasta. **Per-titteli** timeout-wrapatut skannaukset
+  (`timeout $SCAN_TIMEOUT HandBrakeCLI -i … --title N --scan --json`) tai lsdvd-fallback → yksi
+  vaurioitunut titteli ei vie ehjien metadataa eikä jumita discia. Yksittäisen tittelin timeout → se
+  titteli `broken` scan-tuloksessa, muut palautuvat. Per titteli: numero, kesto, mitat, dar, fps,
+  format, **interlaced-lippu**, crop, src_subs[], src_audio[]. EI kirjoita jonoa.
+- **`enqueue --source … --title … --kind … --name … [--year] [--season/--episode] --role … [--force]`**
+  → luo `jobs/<id>.json`. Idempotenssi kaikkien kolmen hakemiston yli (§5.1). Johtaa `want_audio`/
+  `want_subs` raitapolitiikasta (§8.3). Ekstran `out_name` per-dest-lukossa kirjoitushetkellä.
 - **`dispatch`** (daemon): §8.
-- **`status [--json]`** → tuottaa/lukee status.json.
-- **`skip <id>`** → `user_skip`. **`unskip <id>`** → `pending` (**vaatii lähteen olemassaolon**,
-  kuten retry).
-- **`retry <id>`** → `failed|broken` → `pending` (vaatii lähteen olemassaolon).
-- **`review-problematic`** → listaa `problematic/`.
-- **`cleanup`** → §8.5 (per-disc-lukko + tila-recheck ennen poistoa).
+- **`status [--json]`** → status.json.
+- **`skip <id>`** → §2.6 (pending→user_skip suoraan; encoding→skip_requested).
+- **`unskip <id>`** / **`retry <id>`** → →`pending` (**vaatii lähteen**, per-disc-lukko §8.6).
+- **`review-problematic`** → listaa `problematic/` (yksi totuus, ei erillistä kopiota).
+- **`ack-quarantine <id|disc>`** → kuittaa karanteenilevyn: poistaa sen velka-/karanteenimittarista ja
+  vapauttaa lähteen poistettavaksi (käyttäjän eksplisiittinen päätös, §7/§14).
+- **`cleanup`** → §8.6.
 - **`migrate`** → §9.
 
 ---
 
-## 7. Rippaus + metadata + pääelokuvan tunnistus
+## 7. Rippaus + levytila + pääelokuvan tunnistus
 
-`rip <laite>` (CLI ohjaa, ydin tekee):
-1. **Levytila-esiehto (tavupohjainen, karkeuden dokumentointi):** älä rippaa jos `WORK_DIR` vapaa
-   < `RIP_MIN_FREE_GB`, TAI rippaamatonta enkoodausvelkaa > `RIP_AHEAD_MAX_GB`. **Enkoodausvelka
-   lasketaan per fyysinen levy (`disc_key`), EI per job** (tarkistuksen kohta 3): yksi DVD tuottaa
-   monta jobia jotka viittaavat samaan `disc-NNN`-hakemistoon ja samoihin VOB-tiedostoihin — jos
-   kunkin jobin lähteen koko laskettaisiin erikseen, 7 GB:n levy näyttäisi esim. 28 GB velalta ja
-   estäisi rippauksen turhaan. Velka = **uniikkien `disc_key`-hakemistojen yhteiskoko** joilla on
-   yhä `pending`/`failed`/`broken` jobeja (`du -sb` per disc_key kerran, ei per job).
-   **Tämä on karkea vartio (TOCTOU: rinnakkaiset enkoodaustempit kirjoittavat
-   samaan WORK_DIR:iin) — se vähentää, ei poista, täyttymisriskiä; dispatcher lisäksi keskeyttää
-   uuden slotin avaamisen jos vapaa tila alittaa turvarajan.**
-2. `dvdbackup -M` → `disc-NNN/`. Tallenna READ_ERRORS.
-3. `scan` (per-titteli, timeout-wrapattu). READ_ERRORS > `READ_ERROR_MAX` tai tittelin scan-timeout
-   → kyseinen titteli/levy `problematic/` (`broken`), ei jonoon.
-4. Käyttöliittymä esittää tittelit + metadatan; käyttäjä vahvistaa luokittelun. **`confidence=low`
-   (§ alla) → vahvistus pakollinen ennen enqueueta.**
-5. `enqueue` jokaisesta enkoodattavasta tittelistä.
+`rip <laite>`:
+1. **Levytila-esiehdot (tavupohjaiset, §2.4-muunnos):** älä rippaa jos
+   - `WORK_DIR` vapaa < `RIP_MIN_FREE_GB`, TAI
+   - **enkoodausvelka > `RIP_AHEAD_MAX_GB`**. Velka = **uniikkien `disc_key`-hakemistojen yhteiskoko
+     joilla on `pending`/`encoding`-jobeja** (`du -sb` per disc_key **kerran**, ei per job —
+     7 GB:n levy ei saa näyttää 28 GB velalta, tarkistuksen kohta 3). **failed/broken EIVÄT ole
+     velkaa** vaan karanteenia (ks. alla, tarkistuksen kohta 11).
+   Karkea vartio (TOCTOU: rinnakkaiset enkoodaustempit samaan `$DEST_ROOT/.tmp`:iin) — vähentää, ei
+   poista, täyttymisriskiä; dispatcher lisäksi valvoo `DEST_MIN_FREE_GB` (§8.1).
+2. **Karanteeni erillään velasta:** failed/broken-lähteitä ei siivota (retry tarvitsee ne) eikä
+   yritetä automaattisesti uudelleen — mutta ne EIVÄT saa hiljaa syödä `RIP_AHEAD_MAX_GB`:tä ja estää
+   rippausta ilman näkyvää syytä (tämä olisi alkuperäinen 270 GB -ongelma uudessa asussa). Siksi:
+   karanteeni on **oma mittari** `quarantine_gb` (status.json), ja jos se ylittää `QUARANTINE_MAX_GB`,
+   `rip`/`status` **varoittaa näkyvästi** ja pyytää käyttäjää joko `retry`- tai `ack-quarantine`-
+   käsittelyyn. Karanteenia ei poisteta automaattisesti (ei hiljaista datahävikkiä), mutta se ei myöskään
+   jää näkymättömäksi lattiaksi.
+3. `dvdbackup -M` → `disc-NNN/`. Tallenna READ_ERRORS.
+4. `scan` (per-titteli, timeout). READ_ERRORS > `READ_ERROR_MAX` tai scan-timeout → titteli/levy
+   `broken` (`problematic/`), ei jonoon. Koko levyn lukukelvottomuus → levytason `disc:`-broken (§5.1).
+5. UI esittää tittelit+metadatan; käyttäjä vahvistaa. **`confidence=low` → vahvistus pakollinen.**
+6. `enqueue` jokaisesta enkoodattavasta tittelistä.
 
 **Pääelokuvan tunnistus:** eksplisiittinen pää­titteli → `confidence=high`. Muuten heuristiikka
-(pisin=pää) tuottaa **ehdotuksen + `confidence` + `alt_main_titles[]`**. Useampi pitkä titteli /
-epäselvä rakenne → `confidence=low`, UI pyytää vahvistuksen. Ydin ei koskaan hiljaa arvaa
-epävarmassa.
+(pisin=pää) → **ehdotus + `confidence` + `alt_main_titles[]`**. Useampi pitkä / epäselvä →
+`confidence=low`, UI pyytää vahvistuksen. Ydin ei koskaan hiljaa arvaa epävarmassa.
 
 ---
 
 ## 8. Dispatcher
 
-- **Single-instance:** `dispatch` ottaa `flock`in `dispatch.pid`:iin heti; toinen instanssi
-  poistuu virheellä. Suositellaan ajettavaksi systemd-unittina `Restart=on-failure`.
-- **Pääsilmukka EI ole `set -e`:n alla** — yksittäinen glitchaava alikomento ei saa tappaa
-  dispatcheria. Virheet käsitellään per-job (job → `failed`), silmukka jatkaa.
-- **Slotit:** `PARALLEL` kpl `slots/slot-N.lock` (flock). PARALLEL luettu tuoreena joka kierroksella.
-- **Per-dest-lukko:** ennen ekstran `out_name`-laskentaa flock `locks/<sha1(dest_dir)>.lock`.
-  Tämä on **advisory** ja suojaa vain tämän järjestelmän omilta prosesseilta (§2.3, §14 R3) — ei
-  ulkopuoliselta/käsin tehdyltä samanaikaiselta kirjoitukselta samaan kohdekansioon.
-- **Lämpövahti = ERILLINEN riippumaton prosessi** (ei dispatch/verify/mv-silmukassa, jottei
-  bloknaava NAS-mv viivästytä lämmön pollausta). Se pollaa lämpöä kiinteällä välillä ja:
-  - **`TEMP_WARN`:** `kill -STOP` **enkooderi-prosessiryhmälle** (HandBrake-prosessit; ei dispatcher,
-    ei lämpövahti itse), `kill -CONT` kun lämpö laskee. Palautuva, työ säilyy. `-STOP`/`-CONT`
-    kohdistetaan enkooderin **prosessiryhmään** (pgid), ei yksittäiseen pid:iin — HandBrake voi
-    haarauttaa aliprosesseja, ja koko ryhmän on pysähdyttävä/jatkuttava yhtenä.
-  - **`TEMP_KILL`:** `kill` enkooderit; dispatcher/worker havaitsee ja **palauttaa jobin
-    `pending`:iksi** (ei `failed`), poistaa temp-tulokset. Lämpö ei koskaan merkitse jobia pysyvästi
-    rikki.
-- **Lämpövahdin STOP-tilan reunatapaukset (tarkistuksen kohta 4):** `-STOP` pysäyttää prosessin
-  välittömästi, myös kesken tiedostokirjoituksen — tämä on turvallista koska tulos on aina
-  `dest_dir/.tmp.<id>.mkv` eikä lopullinen nimi (§2.1/§2.5): keskeneräinen temp ei ole koskaan
-  kirjaston tiedosto, ja jos worker myöhemmin `TEMP_KILL`:ataan STOP-tilassa, temp vain poistetaan
-  reclaimissa. STOP-tilassa oleva worker EI voi commitoida jobia (se on jäädytetty) → ei riskiä että
-  puolivalmis menisi `done`:ksi. Jos kone sammuu STOP-tilassa: reboot-toipuminen (tapaus D) palauttaa
-  jobin `pending`.
-- **Lämpövahdin OMA kaatuminen (fail-safe, tarkistuksen kohta 4):** lämpövahti ei saa olla hiljainen
-  yksittäinen vikapiste. Kaksi suojaa: (1) se ajetaan **omana systemd-unittina `Restart=on-failure`**
-  (kuten dispatcher); (2) lämpövahti päivittää **heartbeat-aikaleiman** (`$STATE/thermal.heartbeat`,
-  temp+mv) joka pollauskierroksella, ja **dispatcher tarkistaa sen ennen uuden slotin avaamista** —
-  jos heartbeat on vanhentunut (esim. > 3× pollausväli), lämpösuojaa ei ole aktiivisena → dispatcher
-  **ei avaa uusia enkoodaus-slotteja** ennen kuin heartbeat elpyy (fail-closed, ei fail-open). Näin
-  lämpövahdin kuolema hidastaa/pysäyttää työn kasautumisen, ei jätä konetta suojattomaksi kuumenemaan.
-- **Enkoodaus:** kohteeseen `dest_dir/.tmp.<id>.mkv` (sama fs kuin lopullinen, §2.1). Talleta jobiin
-  `pid`+`starttime`.
-- **Verifiointi ennen kirjastoon vientiä — kaksi eri asiaa (tarkistuksen kohta 5):**
+### 8.1 Silmukka, slotit, levytila
+- **Single-instance:** `flock` `dispatch.pid`:iin heti; toinen instanssi poistuu virheellä. systemd
+  `Restart=on-failure`.
+- **Pääsilmukka EI `set -e`:n alla** — glitchaava alikomento ei tapa dispatcheria; virheet per-job
+  (`failed`), silmukka jatkaa.
+- **Slotit — PARALLEL-laskun kestävä logiikka (sivuhuomio):** slot-pool on `slot-1..slot-PARALLEL_MAX`
+  (kova katto). Uuden jobin saa aloittaa **vain jos tällä hetkellä pidettyjen slot-lukkojen määrä <
+  `PARALLEL`** (luettu tuoreena joka kierroksella). Näin PARALLELin lasku 2:een silloin kun slotit 3–4
+  ovat workereiden hallussa EI johda siihen että dispatcher laskee slotit 1–2 vapaiksi ja käynnistää
+  kaksi lisää (→ 4 rinnakkaista). Pidetty-määrä lasketaan yrittämällä ei-blokkaavaa flockia jokaiseen
+  pool-slottiin; jo varatut jäävät workereille. Rinnakkaisuus laskee asteittain sitä mukaa kun
+  käynnissä olevat valmistuvat.
+- **Levytila ennen slotin avaamista:** älä avaa uutta slottia jos `WORK_DIR` vapaa < `RIP_MIN_FREE_GB`
+  **tai `DEST_ROOT` vapaa < `DEST_MIN_FREE_GB`** (tarkistuksen kohta 10 — temp on nyt NAS:illa
+  `$DEST_ROOT/.tmp`, joten NAS:in täyttyminen kaataisi jokaisen enkoodauksen → failed → velka kasvaa).
 
-  **(a) Rakenteellinen verifiointi (KOVA, hylkää `failed`:iin):** todistaa että tiedosto on ehjä ja
-  sisältää odotetut raidat. Nämä ovat ehdottomia:
-  - ≥ 1 videoraita ja ≥ lähteen ääniraitojen määrä läsnä,
-  - `abs(tulos_kesto - duration_s) <= max(2, ceil(0.01*duration_s))` s (sallii HandBraken legitiimin
-    sekuntien pudotuksen chapter/PAL-trimmauksesta, pysäyttää katkenneen/tyngän),
-  - tiedosto avautuu `ffprobe`lla ilman virhettä, viimeinen paketti ~keston kohdalla (ei ennenaikaista
-    loppua vaikka format-kesto sattuisi toleranssiin).
-  Hylkäys → `failed`, kirjastoa ei kosketa.
+### 8.2 Lämpövahti = ERILLINEN riippumaton prosessi
+Ei dispatch/verify/mv-silmukassa (jottei blokkaava NAS-mv viivästytä pollausta). Pollaa lämpöä
+kiinteällä välillä, lukee kohteena olevat `pgid`:t `encoding`-jobeista (§5.1):
+- **`TEMP_WARN`:** `kill -STOP` enkooderien **prosessiryhmille** (pgid; ei dispatcher, ei vahti itse),
+  `-CONT` kun lämpö laskee. Palautuva. Ryhmä (ei yksittäinen pid), koska HandBrake haarauttaa.
+- **`TEMP_KILL`:** `kill` enkooderit; worker/dispatcher havaitsee → job `pending` (ei failed), temp
+  poistetaan. Lämpö ei koskaan merkitse jobia pysyvästi rikki.
+- **STOP-reunatapaukset:** `-STOP` kesken kirjoituksen on turvallista — tulos on aina
+  `$DEST_ROOT/.tmp/<id>.mkv` (ei lopullinen nimi); jäädytetty worker ei voi commitoida → puolivalmis
+  ei mene `done`:ksi; TEMP_KILL STOP-tilassa → temp vain poistetaan reclaimissa; sammutus STOP-tilassa
+  → reboot-toipuminen (tapaus D) → `pending`.
 
-  **(b) Sisältöheuristiikat (PEHMEÄ, `warnings[]`-kenttään jobiin, EI automaattihylkäys):** vihjeitä
-  siitä että tulos vastaisi lähteen *odotettua* sisältöä. Näitä ei käytetä kovana porttina koska ne
-  tuottavat sekä vääriä hylkäyksiä että vääriä hyväksyntöjä:
-  - tekstityksen kattavuus (viimeisen tekstityksen aika vs kesto) — matala arvo voi olla joko desync/
-    katkos TAI täysin laillinen harva/aikaisin loppuva tekstitys (esim. kokeellinen elokuva). Siksi
-    vain varoitus, GUI:hin näkyviin, ei hylkäys.
-  - odotetut kieli-/raitamäärät scan-metadatasta.
+**Lämpövahdin OMA kaatuminen (fail-safe, tarkistuksen kohta 8 — suojaa MYÖS käynnissä olevat):**
+kaksi kynnystä heartbeatin (`$STATE/thermal.heartbeat`) iälle:
+- **Vanhentuma > 3× pollausväli:** dispatcher **ei avaa uusia slotteja** (fail-closed).
+- **Vanhentuma > 6× pollausväli:** lämpösuojaa ei tosiasiassa ole, ja **käynnissä olevat kaksi x265:tä
+  jatkuvat suojaamatta** — juuri se tilanne jota vastaan mekanismi on. Silloin **dispatcher ottaa
+  lämpöpollauksen itse hoitaakseen** (varamekanismi: lukee lämmöt, `-STOP`aa enkooderiryhmät jos
+  `TEMP_WARN` ylittyy) kunnes erillinen vahti (systemd `Restart=on-failure`) elpyy. Fail-closed EI
+  koske vain uusia slotteja vaan johtaa aktiiviseen suojaan olemassa oleville.
 
-  **Mitä verifiointi EI todista (rehellinen rajoite, §14 R2):** että *oikeat* ääniraidat/kielet ovat
-  mukana, että *oikea* titteli enkoodattiin (ei vaihdettu naapurititteliin samalla kestolla), eikä
-  paikallista sisältöä keskeltä. Näiden todistaminen vaatisi lähdevertailun jota tässä ei tehdä —
-  rakenteellinen verifiointi havaitsee **katkenneen/tyhjän/vääränmittaisen**, ei **väärää-mutta-
-  oikeanmittaista**. Tämä on tietoinen rajaus, ei aukko jota luultaisiin katetuksi.
-- **Kirjaston korvaus:** `mv dest_dir/.tmp.<id>.mkv dest_dir/out_name` (atominen, sama fs). Vanha
-  mahdollinen korvattava → `BACKUP_DIR` (kirjaston ulkopuolella); temp+mv myös sinne. Job → `done`,
-  siirrä `jobs/done/`.
-- **8.5 cleanup (kilpajuoksuton):** ottaa **per-disc-lukon**, sen sisällä re-checkaa että kaikki
-  discen jobit yhä `done|user_skip` (ei muuttunut esim. unskipillä), vasta sitten poistaa lähteen.
-  `unskip` ottaa saman lukon → ei voi tapahtua yhtä aikaa.
-- **Ekstranumerointi:** numero = olemassa olevat kohdekansiossa + jonossa olevat + 1, laskettu
-  **tittelijärjestyksessä** (ei valmistumisjärjestyksessä): numero sidotaan **enqueue-hetkellä**
-  tittelin järjestyksen mukaan, ei enkoodauksen kirjoitushetkellä. **Retry säilyttää saman
-  numeron** (ei aukkoa). (Dokumentoitu käytös, ei määrittelemätön.)
-- **Sammutus (SIGTERM):** dispatcher pyytää lopettaa uusien slottien avaamisen, antaa käynnissä
-  olevien enkoodausten jatkua (tai keskeyttää → jobit `pending` toipumiselle). Määritelty: SIGTERM
-  → ei uusia jobeja, käynnissä olevat jäävät toipumiselle (seuraava käynnistys palauttaa
-  `encoding`→`pending`). Ei jätä katkennutta kirjastotiedostoa (temp ei ole vielä renametty).
+### 8.3 Raitapolitiikka (tarkistuksen kohta 13)
+`enqueue` johtaa `want_audio`/`want_subs` configin politiikasta, EI ota sokeasti kaikkia:
+- `AUDIO_POLICY`: `original` | `original+commentary` | `all` — valitsee ääniraidat kielen/roolin
+  mukaan scan-metadatasta.
+- `AUDIO_CODEC`: `copy` (oletus, häviötön) tai transkoodaus (esim. `ac3`/`aac`) jos määritelty.
+- `SUB_POLICY`: `all` | kielilista — VobSub-tekstitykset (ks. §8.5).
+- `DEINTERLACE`: `auto` (HandBrake `decomb`, laukeaa vain lomitetuille kentille) | `off` | `on`.
+  DVD (PAL/NTSC) on usein lomitettu/telecinattu → oletus `auto` on laadun kannalta olennainen.
+
+### 8.4 Verifiointi ennen kirjastoon vientiä — rakenteellinen vs sisältö
+**(a) Rakenteellinen (KOVA, hylkää `failed`):**
+- ≥ 1 videoraita ja **`want_audio`-politiikan mukainen määrä** ääniraitoja läsnä (EI "≥ lähteen
+  audio" — jos politiikka valitsee 1 raidan, odotus on 1, muuten jokainen job hylättäisiin turhaan,
+  tarkistuksen kohta 13),
+- `abs(tulos_kesto - duration_s) <= max(2, ceil(0.005*duration_s))` s (0,5 % — 5640 s elokuvalla
+  ~28 s; tiukempi kuin 1 % jotta tynkä ei livahda toleranssiin, sivuhuomio),
+- `ffprobe` avaa ilman virhettä; viimeinen paketti ~keston kohdalla (ei ennenaikaista loppua vaikka
+  format-kesto sattuisi toleranssiin).
+Hylkäys → `failed`.
+
+**(b) Sisältöheuristiikat (PEHMEÄ, `warnings[]`-kenttään, EI automaattihylkäys):**
+- tekstityksen kattavuus (viimeisin sub-aika vs kesto) — matala arvo voi olla desync/katkos TAI
+  laillinen harva/aikaisin loppuva tekstitys → vain varoitus.
+- odotetut kielet/raitamäärät.
+
+**Mitä verifiointi EI todista (§14 R2):** *oikeat* ääniraidat/kielet, *oikea* titteli (ei
+naapurititteli samalla kestolla), ei keskeltä puuttuvaa sisältöä. Rakenteellinen havaitsee
+katkenneen/tyhjän/vääränmittaisen, ei "väärä-mutta-oikeanmittainen". Tietoinen rajaus.
+
+### 8.5 Tekstitysten irrotus ja sijainti (v1:n toistuva laatuvika — nyt eksplisiittinen)
+DVD-VobSub-tekstityksissä on tässä projektissa toistunut kaksi vikaa, jotka EIVÄT saa pudota
+spesifikaatiosta (tarkistuksen kohta 12):
+- **Desync:** raaka VOB-konkatenointi ei sisällä NAV-ajastusta → tekstit epäsynkassa. **Sopimus:
+  tekstitykset irrotetaan libdvdnav-pohjaisella demukserilla** (ffmpeg `dvdvideo`), joka lukee
+  NAV-paketit → oikea ajastus. Raaka `concat:VTS…` on kielletty.
+- **Sijainti (tekstit ruudun ulkopuolelle):** VobSub `.idx`:n `size: WxH`-otsake määrää tekstien
+  koordinaatiston. Jos se putoaa, tekstit valuvat ulos rajatulla/anamorfisella kuvalla. **Sopimus:
+  idx:n `size`-otsake säilytetään/injektoidaan vastaamaan lähderesoluutiota; `crop` (job-kentässä)
+  huomioidaan ettei tekstejä työnnetä pois näkyvistä.**
+Automaattinen desync-*havaitseminen* on silti vain heuristiikka (§8.4b, §14 R6) — menetelmä on
+oikea, mutta "tekstit synkassa" ei ole koneellisesti todistettavissa ilman katselua.
+
+### 8.6 Kirjastoon vienti, cleanup, ekstranumerointi
+- **Kirjaston korvaus:** `mv "$DEST_ROOT/.tmp/<id>.mkv" dest_dir/out_name` (atominen, sama fs, §2.1).
+  Vanha korvattava → `$BACKUP_DIR` (temp+mv+fsync). Job → `done` (§2.5-järjestys), siirto `jobs/done/`.
+- **cleanup (kilpajuoksuton):** per-disc-lukko (`locks/disc-<sha1>.lock`); sen sisällä re-check että
+  discen kaikki jobit yhä `done|user_skip` (ei muuttunut unskipillä/retryllä), tuore sisältötarkistus
+  kohdetiedostolle (§14 R1), vasta sitten poista lähde. `unskip`/`retry` ottavat saman lukon.
+- **Ekstranumerointi (arkisto huomioitu, tarkistuksen kohta 6b):** per-dest-lukon sisällä numero =
+  **max(kohdekansiossa levyllä olevat ekstraindeksit ∪ aktiivisten jobien varaamat ekstra-out_namet
+  samaan dest_diriin) + 1**. Koska done-ekstrojen **tiedostot ovat levyllä** (vaikka job on
+  arkistoitu `jobs/done/`:iin), kohdekansion tiedostojen skannaus kattaa ne — laskenta ei jää
+  jumiin siihen että jobs/done/:ia ei lueta. Numero sidotaan **enqueue-hetkellä tittelijärjestyksessä**;
+  **retry säilyttää saman numeron** (ei aukkoa/törmäystä).
+- **SIGTERM:** ei uusia slotteja; käynnissä olevat jäävät toipumiselle (seuraava käynnistys
+  `encoding`→`pending`). Ei katkennutta kirjastotiedostoa (temp ei renametty).
 
 ---
 
 ## 9. Migraatio + turvallinen tilanvapautus
 
 `migrate` (kertaluontoinen, vasta testauksen jälkeen):
-1. Tuo vanhat jonorivit → `enqueue`. Metadata: **timeout-wrapattu** probe (sama scan kuin §6 — ei
-   paljas scan; vaurioitunut levy → `broken`, ei jumita migraatiota).
-2. Merkitse `done` **vain** ne joiden dest-tiedosto **läpäisee §8:n sisältöverifioinnin** (video+
-   ääni läsnä, kesto ~ tallennettu). **Ei koskaan pelkän olemassaolon perusteella** — katkennut/
-   korruptoitunut dest → `pending`, ei `done`.
+1. Vanhat jonorivit → `enqueue` (idempotenssi kolmen hakemiston yli, §5.1). Metadata:
+   **timeout-wrapattu** probe (sama scan kuin §6); vaurioitunut → `broken`.
+2. `done` **vain** jos dest-tiedosto **läpäisee §8.4(a) rakenteellisen verifioinnin** (video+
+   want_audio-määrä läsnä, kesto ~ tallennettu). **Ei koskaan pelkän olemassaolon perusteella.**
 3. Muut → `pending` (lähde säilyy).
 4. Lähteen VOB-poisto vain disceille joiden kaikki jobit `done` (verifioitu) tai `user_skip`.
 5. Vanhat rakenteet poistetaan vasta kun migraatio todettu oikeaksi.
 
-**Duplikaattien käsittely on eksplisiittinen rajoite, ei ominaisuus (tarkistuksen kohta 10, §14 R4):**
-jos olemassa oleva dest-tiedosto on ehjä JA lähde on yhä olemassa, migraatio ei muodosta uutta jobia
-samalle sisällölle (dest-tiedoston läsnäolo + verifiointi ⇒ `done`, ei uudelleenenkoodausta). **Sama
-elokuva kahdella eri DVD-julkaisulla, tai sama levy vahingossa kahteen kertaan ripattuna, ovat eri
-`disc_key`-polkuja → järjestelmä käsittelee ne eri töinä eikä yritä yhdistää niitä.** Duplikaattien
-tunnistus ja karsinta jää **tarkoituksella käyttäjän vastuulle** (valinnainen volume-nimi+kestosumma-
-tarkistus, §5.1). Tätä ei luvata ratkaistuksi.
+**Duplikaatit = eksplisiittinen rajoite, ei ominaisuus (§14 R4):** ehjä dest + olemassa oleva lähde →
+ei uutta jobia samalle sisällölle. Sama teos eri julkaisuina / sama levy kahdesti = eri `disc_key` →
+eri työt, ei yhdistetä. Karsinta jää käyttäjälle (valinnainen volume-nimi+kestosumma-tarkistus).
 
 ---
 
 ## 10. GUI-valmius + varmuuskopioiden retention
 
-- **GUI** (erillinen projekti) lukee `status.json` + `jobs/*.json` + `jobs/done/*.json` +
-  `problematic/*.json` ja kutsuu ydinkomentoja. Ei muutoksia ytimeen. Aikaleimat ISO-8601 UTC
-  (nanosekuntitarkkuus `created`ssa).
-- **Varmuuskopiot** (`BACKUP_DIR`) ovat kirjaston ULKOPUOLELLA (ei mediapalvelimen skannauksessa).
-  `cleanup` poistaa `BACKUP_RETENTION_DAYS`:ää vanhemmat → ei uutta hiljaista levyntäyttöä.
+- **GUI** (erillinen projekti) lukee `status.json` + `jobs/*` + `problematic/*` + `jobs/done/*` +
+  `counters.json` ja kutsuu ydinkomentoja. `rev`-kenttä (§2.6) tekee muutokset havaittaviksi. Ei
+  muutoksia ytimeen.
+- **Skannauksesta rajattavat NAS-hakemistot:** `$DEST_ROOT/.tmp/` (keskeneräiset enkoodaukset) **ja**
+  `$BACKUP_DIR` (vanhat versiot) — molemmat mediapalvelimen ignore-säännöllä pois indeksistä, jotta
+  kirjaston kohdekansiot pysyvät puhtaina.
+- **Retention:** `cleanup` poistaa `$BACKUP_DIR`:istä `BACKUP_RETENTION_DAYS`:ää vanhemmat.
 
 ---
 
 ## 11. Nimet ja lainaus
-Erikoismerkit (heittomerkki `Astronaut's Wife`, sulut/välit `Fargo (1996)`, ääkköset) poluissa ja
-nimissä: kaikki muuttujat lainataan aina (`"$var"`); jq:lle `--arg`/`-r`; ei lainaamatonta
-interpolointia → ei rikkoutumista eikä injektiota.
+Erikoismerkit (`Astronaut's Wife`, `Fargo (1996)`, ääkköset): kaikki muuttujat aina lainattuina
+(`"$var"`); jq:lle `--arg`/`-r`; ei lainaamatonta interpolointia → ei rikkoutumista/injektiota.
 
 ---
 
 ## 12. Testaus ennen tuotantoa (pakollinen)
 
 1. `bash -n` + `shellcheck`.
-2. **Rinnakkaisuus (stub-enkooderi `sleep N; return 0/1`):** N+1 jobia → tasan N encoding;
-   jobs-tiedostojen rinnakkaiskirjoitus (valmistuvat + enqueue yhtä aikaa) → ei korruptiota/hukkaa;
-   per-dest-lukko → eri numerot; lähteen siivous täsmälleen kerran (vain kaikki done/user_skip).
-3. **Kaatumis-/rebootтoipuminen:** tapa dispatcher kesken encoding → uudelleenkäynnistys palauttaa
-   `pending` **slot-lukon perusteella** (testaa myös PID-reuse-tilanne: väärä prosessi samalla
-   PID:llä ei saa estää toipumista).
-4. **Atomisuus:** cross-fs-tilanne (WORK_DIR vs NAS) — varmista että kirjasto kirjoitetaan
-   dest_dir-tempin kautta, ei WORK_DIR→NAS-mv:llä; jq-guard (viallinen JSON/levy täynnä ei tuhoa targettia).
-5. **cleanup ↔ unskip -kilpajuoksu:** samanaikainen cleanup + unskip → lähde ei katoa unskipatulta.
-6. **Verifiointi:** tyhjä/vajaa/katkennut hylätään; toleranssi sallii legitiimin sekuntien pudotuksen.
-7. **Lämpö (erillinen vahti):** WARN → STOP/CONT palautuu; KILL → job `pending` (ei failed); bloknaava
-   mv silmukassa EI viivästytä lämmön pollausta (vahti erillisenä prosessina).
-8. **Numeeriset:** desimaaliset anturi-/fps-arvot eivät kaada vertailuja (§2.4).
-9. Vasta läpäisyn jälkeen pieni oikea päästä-päähän-testi, sitten migraatio.
+2. **Rinnakkaisuus (stub-enkooderi `sleep N; return 0/1`):** N+1 jobia → tasan N encoding; jobs-
+   tiedostojen rinnakkaiskirjoitus → ei korruptiota; per-dest-lukko → eri numerot; lähteen siivous
+   täsmälleen kerran.
+3. **Per-job-CAS (tarkistuksen kohta 5):** `skip` samaan hetkeen kun worker asettaa `encoding` →
+   lopputulos aina eheä (joko user_skip+enkoodaus keskeytyy, tai encoding jatkuu ja skip_requested
+   honoroituu commitissa) — EI koskaan user_skip+enkoodaus jatkuu -tilaa.
+4. **Kaatumis-/reboottoipuminen:** tapa dispatcher/worker eri kohdissa → 4 tapausta (A–D) oikein;
+   PID-reuse ei estä toipumista; dir-luokkasiirron keskeytys → reconcile pitää terminaalisimman.
+5. **Atomisuus + sijainti:** kirjasto `$DEST_ROOT/.tmp`-tempin kautta (ei WORK_DIR→NAS); temp EI
+   kohdekansiossa; jq-guard (viallinen JSON/levy täynnä ei tuhoa targettia); fsync-järjestys.
+6. **Ekstranumerointi arkiston yli (tarkistuksen kohta 6b):** enkoodaa ekstra → arkistoi → enqueue
+   uusi ekstra samaan kansioon → saa seuraavan vapaan numeron, ei törmäystä.
+7. **cleanup ↔ unskip/retry:** samanaikaisuus → lähde ei katoa unskipatulta.
+8. **Verifiointi:** tyhjä/vajaa/katkennut/väärä-audio-määrä hylätään; want_audio-johdettu odotus.
+9. **Lämpö:** WARN→STOP/CONT; KILL→pending; vahdin kuolema → uudet slotit pysähtyvät JA (kova
+   vanhentuma) dispatcher suojaa käynnissä olevat (tarkistuksen kohta 8).
+10. **Levytila:** DEST_ROOT täynnä → uusi slotti ei avaudu (tarkistuksen kohta 10); GB→tavu-muunnos
+    (tarkistuksen kohta 2) — `RIP_AHEAD_MAX_GB=60` ei estä rippausta väärällä yksiköllä.
+11. **Yksikkö/config:** esimerkki-config parsiutuu ilman inline-kommenttiroskaa (tarkistuksen kohta 1).
+12. **Numeeriset:** desimaaliset anturi-/fps-arvot eivät kaada vertailuja (§2.4).
+13. **Rip-ahead per disc_key:** moni-titteli-levy lasketaan kerran (tarkistuksen kohta 3);
+    karanteeni erillään velasta (kohta 11).
+14. Vasta läpäisyn jälkeen pieni oikea päästä-päähän-testi, sitten migraatio.
 
 ---
 
-## 13. Tarkistuslista toteuttajalle (kolme tarkastuskierrosta integroitu; jäännösrajoitteet §14)
+## 13. Tarkistuslista toteuttajalle (neljä tarkastuskierrosta integroitu; jäännösrajoitteet §14)
 
-- [ ] Kirjasto kirjoitetaan dest_dir-tempin kautta (sama fs), EI WORK_DIR→NAS-mv (atomisuus).
-- [ ] **Kestävyysjärjestys (§2.5): fsync(tiedosto)→fsync(dir)→mv→fsync(dir)→vasta sitten `done`.**
-- [ ] **Worker (ei dispatcher) pitää slot-lukkoa ja commitoi oman jobinsa; 4 toipumistapausta (§4).**
-- [ ] **Jonojärjestys flock-seqfilestä (`seq`), EI kellonaika; `created` vain näyttöä varten.**
-- [ ] **Verifiointi: rakenteellinen (kova hylkäys) vs sisältöheuristiikka (pehmeä varoitus) erillään.**
-- [ ] **rip-ahead-velka per `disc_key`, ei per job (ei tuplalaskentaa samasta levystä).**
-- [ ] **Lämpövahdin heartbeat + dispatcherin fail-closed (ei uusia slotteja jos vahti kuollut).**
-- [ ] Kaatumistoipuminen slot-lukon, ei paljaan PID:n, varassa (reboot/PID-reuse).
-- [ ] Ei lukitsematonta jaettua laskuria; jonojärjestys nanosekunti-`created` (tai flock-seqfile).
-- [ ] cleanup per-disc-lukko + tila-recheck; unskip vaatii lähteen (kuten retry).
-- [ ] JSON-kirjoitus: jq rc + `-s` ennen mv (ei tyhjän/katkenneen mv).
-- [ ] Numeeriset vertailut awk/strip-desimaali -sopimuksella (ei 50°C-bugia).
-- [ ] Lämpövahti erillinen prosessi; KILL → pending; STOP kohdistuu enkooderiryhmään.
-- [ ] Verifioinnin toleranssit numeerisesti määritelty (kesto ±max(2s,1%), kattavuus ≥60%).
-- [ ] Daemonin single-instance (flock pidfile) + systemd Restart; pääsilmukka ei set -e.
-- [ ] Progress-lähde määritelty (HandBrake --json), best-effort jos puuttuu.
-- [ ] jobs/ terminaalitilat arkistoidaan jobs/done/ → dispatch skannaa vain aktiiviset.
-- [ ] Config-parsinta ankkuroitu trailing-strippi + \r; ei inline-kommentteja.
-- [ ] Scan per-titteli/lsdvd-fallback → yksi rikki ei vie muiden metadataa.
-- [ ] Lukot lokaalilla fs:llä, ei NAS:illa.
-- [ ] Ekstranumerointi tittelijärjestyksessä; retry säilyttää numeron (dokumentoitu).
-- [ ] Varmuuskopiot BACKUP_DIR + retention (ei uutta levyntäyttöä).
-- [ ] SIGTERM + set -e -käytös määritelty.
-- [ ] Migraation probe timeout-wrapattu.
-- [ ] rip-ahead tavupohjainen; TOCTOU-karkeus dokumentoitu + dispatcher-turvaraja.
-- [ ] id:n idempotenssi tarkasti kuvattu (per-rip, ei uudelleenrippausten yli); duplikaattitunnistus valinnainen.
+- [ ] Kirjasto `$DEST_ROOT/.tmp`-tempin kautta (sama fs), EI kohdekansion sisällä, EI WORK_DIR→NAS.
+- [ ] `$DEST_ROOT/.tmp` JA `$BACKUP_DIR` rajattu mediapalvelimen skannauksesta.
+- [ ] Kanoninen JSON-kirjoitus (§2.2): mktemp + jq-rc + `-s` + fsync(tiedosto)+fsync(dir) — YKSI funktio.
+- [ ] Kestävyysjärjestys (§2.5): temp→fsync→mv→fsync→vasta sitten `done`.
+- [ ] Per-job-CAS (§2.6): kaikki kirjoittajat per-job-flockissa; skip encoding→skip_requested; rev++.
+- [ ] Worker (ei dispatcher) pitää slot-lukkoa; 4 toipumistapausta; pgid tallennettu.
+- [ ] Yksi totuus per job: problematic/ on sijainti ei kopio; dir-luokkasiirron reconcile.
+- [ ] counters.json → status ei skannaa jobs/done/:ia (O(N) pois).
+- [ ] Ekstranumerointi max(levyn tiedostot ∪ aktiiviset varaukset)+1; retry säilyttää numeron.
+- [ ] enqueue-idempotenssi kolmen hakemiston yli; --force määritelty.
+- [ ] GB→tavu-muunnos eksplisiittinen (§2.4); RIP_AHEAD_MAX_GB tavuvertailuun.
+- [ ] Rip-ahead-velka per disc_key (ei per job); failed/broken = karanteeni erillään (mittari+ack).
+- [ ] DEST_MIN_FREE_GB tarkistetaan ennen slotin avaamista (NAS-temp).
+- [ ] Lämpövahti erillinen; pgid-kohdennettu STOP; kuolema → uudet slotit seis + kova vanhentuma
+      suojaa käynnissä olevat.
+- [ ] Raitapolitiikka (§8.3); verifioinnin audio-odotus want_audio:sta, ei lähteestä.
+- [ ] Deinterlace/detelecine määritelty (DVD-laatu).
+- [ ] Tekstitys: libdvdnav-demukseri (desync) + idx size-otsake/crop (sijainti) (§8.5).
+- [ ] PARALLEL-lasku: aloita vain jos pidetyt slotit < PARALLEL (ei ylitä laskettaessa).
+- [ ] config: ei inline-kommentteja; ankkuroitu trailing-strip + \r.
+- [ ] Jonojärjestys flock-seqfilestä (`seq`); numeeriset awk/strip; lukot lokaalisti; ei set -e;
+      single-instance flock; SIGTERM; migraation probe timeout-wrapattu; scan per-titteli.
 
 ---
 
 ## 14. Tunnetut jäännösrajoitteet (tietoiset rajaukset, EI ratkaistuja aukkoja)
 
-Rehellisyyden vuoksi: nämä eivät ole korjattuja riskejä vaan **tarkoituksellisia rajauksia**.
-Toteuttajan ja käyttäjän on tunnettava ne, ettei niitä luulla katetuiksi.
+Nämä eivät ole korjattuja riskejä vaan **tarkoituksellisia rajauksia**. Toteuttajan/käyttäjän on
+tunnettava ne, ettei niitä luulla katetuiksi.
 
-- **R1 — NAS-fsyncin kestävyys ei ole järjestelmän hallinnassa.** §2.5 tekee oikean fsync-järjestyksen,
-  mutta jos verkkolevy valehtelee `fsync`in kestävyydestä (write-back-cache), viimeinen suoja on
-  `cleanup`in tuore sisältötarkistus ennen lähteen poistoa (§8.5). Lähdettä ei poisteta jos kohde ei
-  ole sillä hetkellä luettavissa ja verifioitavissa.
-- **R2 — Verifiointi on rakenteellinen, ei sisältövertaava (§8).** Havaitsee katkenneen/tyhjän/
-  vääränmittaisen tuloksen, EI "väärä-mutta-oikeanmittainen" (väärä titleri samalla kestolla, väärät
-  kielet, puuttuva keskiosa toleranssin sisällä). Lähdevertailua ei tehdä.
-- **R3 — Lukot ovat advisory ja koordinoivat vain tämän järjestelmän prosesseja (§2.3).** Ulkopuolinen
-  tai käsin tehty samanaikainen muutos NAS-kohdekansioon ei ole suojattu. Oletus: kirjastoa muokkaa
-  vain tämä järjestelmä.
-- **R4 — Duplikaattilevyjä ei yhdistetä (§9).** Sama teos eri julkaisuina / sama levy kahdesti ripattuna
-  = eri työt. Karsinta jää käyttäjälle.
-- **R5 — Optimaalista rinnakkaisuus­astetta (PARALLEL) ei voi tietää ilman mittausta kohderaudalla.**
-  x265-läpimeno per lisä-slotti pienenee CPU-ydinten rajallisuuden takia; lämpöturva (erillinen vahti)
-  on N:stä riippumaton, mutta hyödyllinen N mitataan, ei arvata.
+- **R1 — NAS-fsyncin kestävyys ei ole hallinnassa.** §2.5 tekee oikean järjestyksen, mutta jos
+  verkkolevy valehtelee `fsync`ista, viimeinen suoja on `cleanup`in tuore sisältötarkistus ennen
+  lähteen poistoa (§8.6).
+- **R2 — Verifiointi on rakenteellinen, ei sisältövertaava (§8.4).** Havaitsee katkenneen/tyhjän/
+  vääränmittaisen, EI "väärä-mutta-oikeanmittainen" (väärä titteli samalla kestolla, väärät kielet,
+  puuttuva keskiosa toleranssin sisällä). Lähdevertailua ei tehdä.
+- **R3 — Lukot ovat advisory, koordinoivat vain tämän järjestelmän prosesseja (§2.3).**
+- **R4 — Duplikaattilevyjä ei yhdistetä (§9).** Karsinta käyttäjälle.
+- **R5 — Optimaalista `PARALLEL`:ia ei voi tietää ilman mittausta kohderaudalla.** Lämpöturva on
+  N:stä riippumaton, mutta hyödyllinen N mitataan.
+- **R6 — Tekstityksen desync-havaitseminen on heuristiikka.** Irrotus*menetelmä* on oikea (§8.5,
+  libdvdnav), mutta "tekstit synkassa" ei ole koneellisesti todistettavissa ilman katselua; §8.4(b)
+  tuottaa vain varoituksen, ei takuuta.
 
 ---
 
-Tämä spesifikaatio on itsenäinen eikä edellytä vanhan koodin tuntemusta. **Kolme tarkastuskierrosta
-(13 + 20 + 10 riskiä) on integroitu sopimuksiksi.** En väitä että "kaikki riskit on ratkaistu" —
+Tämä spesifikaatio on itsenäinen eikä edellytä vanhan koodin tuntemusta. **Neljä tarkastuskierrosta
+(13 + 20 + 10 + 14 riskiä) on integroitu sopimuksiksi.** En väitä että "kaikki riskit on ratkaistu" —
 tunnistetut korjattavat kohdat on korjattu, ja loput ovat §14:n tietoisia, dokumentoituja rajauksia.
-Ennen toteutusta erityistä huomiota vaativat aidosti arkkitehtuuritason kohdat olivat **(1) worker-
-omisteinen slot-lukko + 4 toipumistapausta ja (2) fsync-kestävyysjärjestys ennen `done`:a** — molemmat
-nyt §4:ssä ja §2.5:ssä.
+Aidosti arkkitehtuuritason kohdat (worker-omisteinen slot-lukko + toipuminen, fsync-kestävyys ennen
+`done`:a, per-job-CAS, temp pois kirjastosta, arkiston-tietoinen numerointi, karanteeni erillään
+velasta) on ratkaistu §2–§8:ssa.
