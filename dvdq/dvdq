@@ -9,6 +9,7 @@ source "$DVDQ_HOME/lib/common.sh"
 source "$DVDQ_HOME/lib/jobs.sh"
 source "$DVDQ_HOME/lib/commands.sh"
 source "$DVDQ_HOME/lib/verify.sh"
+source "$DVDQ_HOME/lib/cleanup.sh"
 source "$DVDQ_HOME/lib/thermal.sh"
 source "$DVDQ_HOME/lib/dispatch.sh"
 
@@ -49,6 +50,8 @@ main() {
     dispatch) cmd_dispatch "$@" ;;
     thermal)  [ "${1-}" = --backup ] && thermal_watchdog backup || thermal_watchdog main ;;
     verify)   cmd_verify "$@" ;;
+    cleanup)  cmd_cleanup "$@" ;;
+    ack-quarantine) cmd_ack_quarantine "$@" ;;
     reconcile) reconcile ;;
     -h|--help|help) usage; return 0 ;;
     *) err_out bad_state command "$cmd" "tunnettu komento"; usage; return 1 ;;

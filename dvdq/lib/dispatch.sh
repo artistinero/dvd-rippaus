@@ -169,7 +169,7 @@ _next_pending_id() {  # pienin seq pending ensin (§8.1 sivuhuomio)
   local p; for p in "$STATE/jobs"/*.json; do [ -e "$p" ] || continue;
     jq -r 'select(.status=="pending")|"\(.seq) \(.id)"' "$p" 2>/dev/null; done | sort -n | head -1 | awk '{print $2}'
 }
-write_status() { cmd_status > "$STATE/status.json.t" 2>/dev/null && mv -f "$STATE/status.json.t" "$STATE/status.json"; }
+write_status() { cmd_status --fast > "$STATE/status.json.t" 2>/dev/null && mv -f "$STATE/status.json.t" "$STATE/status.json"; }
 
 # reserve_job <id> <slot> — atominen pending→encoding varaus (§2.6). Estää saman jobin
 # kaksoiskäytön: kun tila on encoding, _next_pending_id ei enää palauta sitä.

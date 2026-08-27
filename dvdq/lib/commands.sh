@@ -177,18 +177,31 @@ dispatcher_alive() {   # true jos dispatch.pid-flock on jonkun hallussa
   local pf="$STATE/dispatch.pid"
   if flock -n "$pf" -c true 2>/dev/null; then printf false; else printf true; fi
 }
+# cmd_status [--fast] — LUKUKOMENTO. Perus (counters+tila) on halpa. Levytila-/velkamittarit
+# (du NAS:illa) ovat KALLIITA, joten ne lasketaan vain ihmisen/GUI:n `status`-kutsulla ja OHITETAAN
+# dispatcherin tiheässä write_status-kirjoituksessa (--fast). Best-effort: mukana vain jos
+# cleanup.sh sourcattu (guard command -v).
 cmd_status() {
+  local fast=0; [ "${1-}" = --fast ] && fast=1
   local cp; cp=$(_counters_path)
   local counters='{"pending":0,"encoding":0,"failed":0,"broken":0,"done":0,"user_skip":0,"abandoned":0,"state_rev":0}'
   [ -f "$cp" ] && counters=$(cat "$cp")
-  # encoding-jobit (kevyt lista)
   local enc="[]" p
   enc=$(for p in "$STATE/jobs"/*.json; do [ -e "$p" ] || continue;
         jq -c 'select(.status=="encoding")|{id,name,slot,pid}' "$p" 2>/dev/null; done | jq -cs '.')
   local paused=false; [ -f "$STATE/paused" ] && paused=true
   local alive; alive=$(dispatcher_alive)
   local updated; updated=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local meters='{}'
+  if [ "$fast" != 1 ] && command -v quarantine_bytes >/dev/null 2>&1; then
+    meters=$(jq -cn \
+      --argjson ed "$(( $(encode_debt_bytes) / 1073741824 ))" \
+      --argjson qg "$(( $(quarantine_bytes) / 1073741824 ))" \
+      --argjson ag "$(( $(abandoned_bytes)  / 1073741824 ))" \
+      '{encode_debt_gb:$ed,quarantine_gb:$qg,abandoned_gb:$ag}')
+  fi
   jq -cn --argjson c "$counters" --argjson enc "$enc" --argjson paused "$paused" \
         --argjson alive "$alive" --arg updated "$updated" --argjson parallel "${CFG[PARALLEL]}" \
-    '$c + {updated:$updated,parallel:$parallel,dispatcher_alive:$alive,paused:$paused,encoding:$enc}'
+        --argjson m "$meters" \
+    '$c + $m + {updated:$updated,parallel:$parallel,dispatcher_alive:$alive,paused:$paused,encoding:$enc}'
 }
