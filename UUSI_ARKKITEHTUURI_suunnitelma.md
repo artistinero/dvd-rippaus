@@ -59,7 +59,10 @@ kestävyystakuu (§2.5) ei koskaan jää pois `done`-kirjoituksesta unohduksen t
 write_json_atomic(target, json_producer):
   dir=$(dirname target); tmp=$(mktemp "$dir/.tmp.XXXXXX")   # mktemp: uniikki myös rinnakkaisille aliprosesseille
   if json_producer >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
-      sync -d "$tmp"; mv -f "$tmp" "$target"; sync "$dir"   # data (fdatasync) + rename (dir-fsync)
+      sync -d "$tmp" || { rm -f "$tmp"; return 2; }         # data ei kestävä → EI mv:tä, target koskematon
+      mv -f "$tmp" "$target"
+      sync "$dir"     || return 3                           # rename ei kestävä → target on paikallaan, mutta rc≠0
+      return 0
   else
       rm -f "$tmp"; return 1   # jq-virhe / levy täynnä → target koskematon
   fi
@@ -77,6 +80,12 @@ write_json_atomic(target, json_producer):
 - `jq`:n rc **ja** epätyhjyys (`-s`) tarkistetaan ennen `mv`:tä → sokeaa `mv tmp target` ei koskaan.
 - **`sync -d` tiedostolle ja `sync` (ilman `-d`) hakemistolle** sisältyy funktioon → jokainen
   tilakirjoitus on kestävä. (Ei `-d` hakemistolle — A4: hakemiston kestävyys on metadataa.)
+- **`sync`in rc tarkistetaan (kohta 1, ainoa toiminnallinen):** guard tarkisti tähän asti vain `jq`:n
+  rc:n ja `-s`:n; `sync`in epäonnistuminen olisi mennyt läpi huomaamatta → `done` voitaisiin kirjoittaa
+  ilman kestävyyttä. Funktio palauttaa nyt: `2` = data ei kestynyt (ennen `mv`:tä, target koskematon),
+  `3` = rename ei kestynyt (tiedosto paikallaan mutta ei varmistettu). Kutsuja (§2.5) valitsee
+  toiminnan rc:n mukaan. **Tämä EI korvaa R1:tä:** rc-tarkistus suojaa *raportoiduilta* virheiltä, R1
+  koskee tilannetta jossa NAS valehtelee onnistumisesta — molempia tarvitaan.
 
 ### 2.3 Lukot vain lokaalilla levyllä
 `$STATE/locks/`, `$STATE/slots/` ja daemonin pidfile ovat **aina lokaalilla tiedostojärjestelmällä**
@@ -120,8 +129,19 @@ valtuuttaa lähde-VOBien poiston (§4), tämä ei ole hyväksyttävää.**
 5. **vasta sitten** `done`-tila §2.2:n kanonisella (`sync -d`-sisältävällä) kirjoituksella.
 
 Näin `done` ei koskaan ehdi levylle ennen kohdetiedostoa. Sama järjestys `$BACKUP_DIR`-varmuuskopiolle.
-**NAS-varaus (§14 R1):** jos verkkolevy valehtelee `sync`in kestävyydestä, viimeinen suoja on
-`cleanup`in tuore sisältötarkistus ennen lähteen poistoa (§8.6).
+
+**`sync`-epäonnistumisen käsittely (kohta 1) — kolme eri käytöstä, ei yhtä sääntöä:**
+
+| Kohta | Jos `sync` epäonnistuu |
+|---|---|
+| vaiheet 1–2 (ennen `mv`:tä; funktion rc `2`) | Keskeytä, poista temp, job → `failed`. Mitään ei tapahtunut, kirjastoa ei kosketa. |
+| vaihe 4 (`sync dest_dir` renamen jälkeen; rc `3`) | Ei voi keskeyttää — tiedosto on jo paikallaan. **ÄLÄ kirjoita `done`ia** (job jää `encoding`→reclaimin kautta `pending`). Toipuminen turvallinen: uudelleenenkoodaus korvaa saman tiedoston idempotentisti ja lähde on yhä olemassa (ei siivottu koska ei `done`). |
+| §2.2 kanoninen funktio | Nostaa `sync`in rc:n paluuarvoon (`2`/`3`), kutsuja tietää ettei kirjoitus ole kestävä. |
+
+**NAS-varaus (§14 R1):** jos verkkolevy valehtelee `sync`in kestävyydestä (rc=0 mutta data ei
+levyllä), rc-tarkistus ei auta — viimeinen suoja on `cleanup`in tuore sisältötarkistus ennen lähteen
+poistoa (§8.6). Rc-tarkistus (kohta 1) suojaa *raportoiduilta* virheiltä, R1 *valehdelluilta*;
+molempia tarvitaan.
 
 ### 2.6 Per-job-kirjoitussopimus (CAS) — kaikki jobin kirjoittajat, ei vain worker
 `jobs/`-mallin lupaus "yhtä jobia muuttaa vain omistaja" **ei toteudu ilman valvontaa**, koska myös
@@ -171,7 +191,8 @@ $STATE/                         (STATE = paikallinen, esim. $WORK_DIR/state)
   locks/job-<id>.lock           per-job read-modify-write -lukko (§2.6)
   locks/dest-<sha1(dest)>.lock  per-kohdekansio-lukko (ekstranumerointi)
   locks/disc-<sha1(key)>.lock   per-disc-lukko (cleanup ↔ unskip/retry, §8.6)
-  locks/counters.lock           counters.json-päivitys
+  locks/counters.lock           counters.json + state_rev -päivitys (§15 B3)
+  locks/thermal.lock            pää-/varavahdin keskinäinen omistajuus (§8.2, vain yksi ohjaa pgid:tä)
   slots/slot-N.lock             rinnakkaisslotit (flock; N = 1..PARALLEL_MAX kova katto)
   dispatch.pid                  daemonin single-instance-lukko
   thermal.heartbeat             lämpövahdin elossaolo-aikaleima (fail-safe, §8)
@@ -580,6 +601,13 @@ kaksi kynnystä heartbeatin (`$STATE/thermal.heartbeat`) iälle:
   lämpöpollausta — inline-pollaus hätätilassa antaisi heikoimman suojan juuri silloin kun sitä
   tarvitaan. Varavahti on kevyt itsenäinen prosessi kuten pääkin. Fail-closed (uusia slotteja ei
   avata) pysyy voimassa koko ajan; varavahti hoitaa aktiivisen suojan olemassa oleville.
+- **Päävahdin ja varavahdin omistajuus (tarkistuksen kohta 2):** jos päävahti oli vain hetkellisesti
+  myöhässä ja herää samaan aikaan kun varavahti on käynnistetty, molemmat ohjaisivat samaa pgid:tä.
+  STOP/CONT ovat idempotentteja (ei bugi), mutta jätetään määrittelemättä. **Sopimus:
+  `locks/thermal.lock` — kumpi tahansa vahti pollaa/ohjaa vain lukon sisällä.** Väistämissääntö:
+  **herännyt päävahti odottaa lukkoa** (ei tapa varavahtia); **varavahti poistuu heti kun havaitsee
+  heartbeatin taas tuoreutuvan** (päävahti elpyi) ja vapauttaa lukon. Korkeintaan yksi vahti ohjaa
+  pgid:tä kerrallaan.
 
 ### 8.3 Raitapolitiikka (tarkistuksen kohta 13)
 `enqueue` johtaa `want_audio`/`want_subs` configin politiikasta, EI ota sokeasti kaikkia:
@@ -703,7 +731,9 @@ eri työt, ei yhdistetä. Karsinta jää käyttäjälle (valinnainen volume-nimi
 - **GUI** (erillinen projekti) lukee `status.json` + `jobs/*` + `problematic/*` +
   **`jobs/done/index.jsonl`** (sivutettu arkistolistaus, EI `jobs/done/*.json`-massaskannaus, A6) +
   `counters.json` + `scans/*` ja kutsuu ydinkomentoja. `rev`-kenttä (§2.6) tekee muutokset
-  havaittaviksi; **virhekuori (§6.1)** tekee virheistä esitettäviä; **`dispatcher_alive` + `updated`**
+  havaittaviksi; **valmis job näytetään muodossa `DONE — structurally verified`, ei pelkkänä `DONE`**
+  (R2: verifiointi on rakenteellinen ei sisältövertaava — käyttäjä ei lue §14:ää, hän lukee sanan
+  "done"; ei muuta ydintä); **virhekuori (§6.1)** tekee virheistä esitettäviä; **`dispatcher_alive` + `updated`**
   (§5.2) paljastavat alhaalla olevan daemonin; **`scans/<sha1(disc_key)>.json`** (§5.5/§6.2) tekee scan→vahvistus→
   enqueue-ketjusta kaatumisen kestävän. Ydin ei kysy mitään, kaikki tila on levyllä → GUI on tilaton
   renderöivä kerros. Ei muutoksia ytimeen.
@@ -774,7 +804,11 @@ Erikoismerkit (`Astronaut's Wife`, `Fargo (1996)`, ääkköset): kaikki muuttuja
 30. **Append-atomisuus (kohta 2):** N rinnakkaista kirjoittajaa appendaa `index.jsonl`/`audit.jsonl`
     yksi-`write()`-muodolla → jokainen rivi eheä, ei lomittunutta (todistaa §8.6/§15 B2 -sopimuksen,
     EI testin 2 kautta joka koskee job-tiedostoja).
-31. Vasta läpäisyn jälkeen pieni oikea päästä-päähän-testi, sitten migraatio.
+31. **sync-rc (kohta 1):** `sync` epäonnistuu vaiheessa 4 (renamen jälkeen) → `done`ia EI kirjoiteta,
+    lähde säilyy, uudelleenajo korvaa saman tiedoston ja onnistuu.
+32. **Vahdin omistajuus (kohta 2):** päävahti myöhässä → varavahti käynnistyy → päävahti herää →
+    vain toinen ohjaa pgid:tä (`thermal.lock`); varavahti poistuu kun heartbeat tuoreutuu.
+33. Vasta läpäisyn jälkeen pieni oikea päästä-päähän-testi, sitten migraatio.
 
 ---
 
@@ -788,6 +822,8 @@ Erikoismerkit (`Astronaut's Wife`, `Fargo (1996)`, ääkköset): kaikki muuttuja
 - [ ] **§15 B1: cleanup+migrate plan/execute + `--dry-run` (rakenne alusta, ei jälkiasennus).**
 - [ ] **§15 B2: audit.jsonl, rivi ENNEN peruuttamatonta operaatiota.**
 - [ ] **Append-tiedostot (index.jsonl, audit.jsonl): yksi `write()` + PIPE_BUF-mittainen rivi.**
+- [ ] **`sync`in rc tarkistetaan (§2.2 rc 2/3); vaihe-4-fail → EI `done`ia, reclaim→pending (§2.5).**
+- [ ] **Pää-/varavahti: `thermal.lock`, vain yksi ohjaa pgid:tä; herännyt pää odottaa, vara poistuu.**
 - [ ] **§15 B3: state_rev (counters.lockissa), GUI ohittaa skannauksen muuttumattomana.**
 - [ ] **§15 B4: verifiointi itsenäinen funktio + `verify`-komento (3 kutsujaa jo nyt).**
 - [ ] **§15 B5: `may_open_slot()` kokoaa 4 ehtoa; `pause`/`resume` (`$STATE/paused`).**
@@ -927,8 +963,8 @@ ovat valmiina ja testattuina ENNEN migraatiota**, koska migraatio on kertaluonto
 eikä toistettavissa. Ainoa aidosti myöhemmäksi siirtyvä osa on **GUI itse** — erillinen kerros, ei
 ytimen ominaisuus.
 
-Tämä spesifikaatio on itsenäinen eikä edellytä vanhan koodin tuntemusta. **Kahdeksan tarkastuskierrosta
-(13 + 20 + 10 + 14 + 10 + 9 + 6 + 6 riskiä + GUI-aukot + läpileikkaavat §15) on integroitu sopimuksiksi.**
+Tämä spesifikaatio on itsenäinen eikä edellytä vanhan koodin tuntemusta. **Yhdeksän tarkastuskierrosta
+(13 + 20 + 10 + 14 + 10 + 9 + 6 + 6 + 3 riskiä + GUI-aukot + läpileikkaavat §15) on integroitu sopimuksiksi.**
 En väitä että "kaikki riskit on ratkaistu" — tunnistetut korjattavat kohdat on korjattu, ja loput ovat
 §14:n (R1–R8) tietoisia, dokumentoituja rajauksia. Seitsemännen kierroksen aito korrektiusriski oli
 **`--force` joka olisi voinut kumota `rev`-reconcilen — nyt `rev` on globaalisti monotoninen (§2.6 A1)**;
