@@ -59,3 +59,20 @@ Async-osiot (worker päästä-päähän, oikea rinnakkaisuus, oikea DVD/lämpö)
    PERUUTTAMATON — käyttäjän erillinen lupa).
 7. Ota systemd-unitit käyttöön. Rajaa mediapalvelin ohittamaan `$DEST_ROOT/.tmp` ja `$BACKUP_DIR` (R7).
 ```
+
+## Tietoiset poikkeamat spec'stä ja rajoitteet
+
+- **`migrate --manifest FILE`** poikkeaa §9:stä (joka lukee vanhat `session_*/.queue`-hakemistot):
+  migraatio ottaa **eksplisiittisen JSONL-manifestin** (yksi vanha jonorivi per rivi). Erillinen
+  adapteri muuntaa `rip-dvd.sh`:n `.queue` → JSONL; se viimeistellään brainbinilla oikeaa dataa
+  vasten. Manifesti on turvallisempi (dry-run näyttää tarkalleen mitä tuodaan) mutta on tietoinen
+  spec-poikkeama.
+- **Enkooderin käynnistys nojaa non-interactive-shelliin** (daemon): `setsid enc &` → `$!` on
+  enkooderin pgid vain kun job control on pois päältä. Systemd ajaa daemonin non-interactivena, joten
+  tämä pätee — mutta se on hauras riippuvuus. Todennettava brainbinilla (`ps -o pgid`).
+- **Orpo-tempin fd-tarkistus** (`/proc/*/fd`) ei näe muiden käyttäjien fd:itä ilman roottia; 5 min
+  mtime-marginaali kattaa käytännön tapaukset. Kova AND-ehto on niin kova kuin yhden käyttäjän
+  näkymä sallii.
+- **Sandbox-testaus:** dev-koneen bash-työkalu tappaa `setsid`-prosesseja käynnistävät komennot →
+  `worker_run` päästä-päähän (oikea rinnakkaisuus, setsid/pgid, oikea lämpö, oikea DVD) todennetaan
+  brainbinilla. Dev-koneella STUBit + synkroniset testit (n. 190 väitettä).
