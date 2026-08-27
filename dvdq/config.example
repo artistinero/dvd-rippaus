@@ -1,0 +1,41 @@
+# dvdq-konfiguraatio — kopioi ~/.config/rip-dvd/config ja muokkaa.
+# AVAIN=arvo per rivi. EI rivinsisäisiä kommentteja (vain omat #-rivit). §5.3/§5.4.
+
+# --- rinnakkaisuus ja laatu ---
+PARALLEL=2
+PARALLEL_MAX=4
+CRF=21
+ENCODER=x265
+
+# --- raitapolitiikka (§8.3) ---
+AUDIO_POLICY=original+commentary
+AUDIO_CODEC=copy
+SUB_POLICY=all
+DEINTERLACE=auto
+
+# --- kansiot ---
+DEST_ROOT=/mnt/terastation/dlna/vids
+DIR_MOVIES=movies
+DIR_SERIES=series
+DIR_DOCS=documentaries
+DIR_MUSIC=music
+DIR_MISC=misc
+WORK_DIR=/home/keitsi/dvd-rip-tmp
+# BACKUP_DIR ja WORK_DIR/state pidetään kirjaston/skannauksen ULKOPUOLELLA
+BACKUP_DIR=/mnt/terastation/dlna/desync-backups
+BACKUP_RETENTION_DAYS=30
+SCAN_TTL_DAYS=14
+
+# --- lämpö (°C) ---
+TEMP_WARN=85
+TEMP_KILL=95
+
+# --- kynnykset (kaikki *_GB gigatavuja) ---
+MIN_DURATION=300
+READ_ERROR_MAX=20
+SCAN_TIMEOUT=600
+RIP_MIN_FREE_GB=40
+DEST_MIN_FREE_GB=20
+RIP_AHEAD_MAX_GB=60
+QUARANTINE_MAX_GB=100
+LOOP_INTERVAL=5

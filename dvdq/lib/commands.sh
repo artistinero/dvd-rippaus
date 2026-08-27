@@ -171,6 +171,21 @@ cmd_retry() {
 }
 
 # =============================================================================
+# pause / resume (§15 B5) — lippu $STATE/paused; may_open_slot väistää sen. Käynnissä olevat
+# enkoodaukset jatkuvat aina loppuun; vain uusien slottien avaus pysähtyy.
+# =============================================================================
+cmd_pause()  { : > "$STATE/paused"; ok_out '"paused":true'; }
+cmd_resume() { rm -f "$STATE/paused"; ok_out '"paused":false'; }
+
+# review-problematic (§6.2) — listaa failed/broken-jobit (problematic/). LUKUKOMENTO.
+cmd_review_problematic() {
+  local p arr
+  arr=$(for p in "$STATE/problematic"/*.json; do [ -e "$p" ] || continue;
+        jq -c '{id,name,status,fail_reason,disc_key,read_errors}' "$p" 2>/dev/null; done | jq -cs '.')
+  ok_out "$(printf '"problematic":%s' "${arr:-[]}")"
+}
+
+# =============================================================================
 # status (§5.2) — LUKUKOMENTO (ei writable-validointia, ei NAS-statia)
 # =============================================================================
 dispatcher_alive() {   # true jos dispatch.pid-flock on jonkun hallussa

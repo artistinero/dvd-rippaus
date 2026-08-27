@@ -1,0 +1,17 @@
+# dvdq dispatcher — yksi globaali enkoodausjono (§8). Asenna: /etc/systemd/system/
+# Muokkaa User=/ExecStart-polku ympäristöösi. Käyttöön: systemctl enable --now dvdq-dispatch
+[Unit]
+Description=dvdq encode dispatcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=keitsi
+ExecStart=/usr/local/lib/dvdq/dvdq dispatch
+Restart=on-failure
+RestartSec=5
+# single-instance on hoidettu flockilla (dispatch.pid); systemd vain elvyttää
+
+[Install]
+WantedBy=multi-user.target

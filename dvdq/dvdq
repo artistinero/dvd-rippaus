@@ -31,7 +31,9 @@ EOF
 # Komennot jotka EIVÄT tarvitse NAS-writable-validointia (§5.4): lukukomennot + paikallista tilaa
 # koskevat palvelut. `thermal` koskee vain lokaalia STATEa (heartbeat, job-liput) → ei saa kaatua/
 # jäädä odottamaan NAS-statia, jottei lämpöturva katoa NAS-katkon takia.
-_is_readonly_cmd() { case $1 in status|review-problematic|reconcile|thermal|verify|scan) return 0;; *) return 1;; esac; }
+# Paikallista STATEa koskevat komennot ohittavat NAS-writable-validoinnin (§5.4): eivät saa
+# kaatua/jäädä NAS-katkoon (pause/resume ovat hätäohjaus).
+_is_readonly_cmd() { case $1 in status|review-problematic|reconcile|thermal|verify|scan|pause|resume) return 0;; *) return 1;; esac; }
 
 main() {
   local cmd=${1-}; [ $# -gt 0 ] && shift || true
@@ -58,6 +60,9 @@ main() {
     scan)     cmd_scan "$@" ;;
     rip)      cmd_rip "$@" ;;
     migrate)  cmd_migrate "$@" ;;
+    pause)    cmd_pause ;;
+    resume)   cmd_resume ;;
+    review-problematic) cmd_review_problematic ;;
     reconcile) reconcile ;;
     -h|--help|help) usage; return 0 ;;
     *) err_out bad_state command "$cmd" "tunnettu komento"; usage; return 1 ;;
