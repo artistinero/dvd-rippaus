@@ -202,5 +202,22 @@ cmd_dispatch() {
   recover
   if [ "$once" = 1 ]; then dispatch_pass; exec {DFD}>&-; return 0; fi
   trap 'exec {DFD}>&- 2>/dev/null; exit 0' TERM INT
-  while true; do dispatch_pass; sleep "${CFG[LOOP_INTERVAL]}"; done
+  while true; do dispatch_pass; _ensure_backup_watchdog; sleep "${CFG[LOOP_INTERVAL]}"; done
+}
+
+# _ensure_backup_watchdog — §8.2 fail-safe (>6× vanhentuma): jos lämpövahdin heartbeat on ollut
+# pysähdyksissä yli 6× pollausvälin (= erillinen vahti kuollut) JA heartbeat-tiedosto on olemassa
+# (= vahti oli käytössä, ei pelkkä "ei koskaan otettu käyttöön"), dispatcher käynnistää MINIMAALISEN
+# erillisen VARAVAHTIPROSESSIN — EI ota pollausta omaan silmukkaansa (§8.2 kohta 7). Fail-closed
+# (uusia slotteja ei avata, may_open_slot) pysyy voimassa; varavahti hoitaa aktiivisen suojan
+# käynnissä oleville. Vain tuotanto-daemonissa; brainbin-integraatiossa todennettava.
+_ensure_backup_watchdog() {
+  command -v thermal_heartbeat_age >/dev/null 2>&1 || return 0    # thermal.sh ei sourcattu (esim. testit)
+  [ -f "$STATE/thermal.heartbeat" ] || return 0                   # vahtia ei otettu käyttöön → ei varaa
+  [ "$(thermal_heartbeat_age)" -gt $(( ${CFG[LOOP_INTERVAL]} * 6 )) ] || return 0
+  [ -n "${DVDQ_HOME:-}" ] || return 0                            # binäärin polku (dvdq-entry asettaa)
+  # Varavahti on erillinen prosessi (oma sessio), joka RE-SOURCAA kirjastot (dvdq-binääri) ja pitää
+  # thermal-backup.lockia koko elinaikansa. flock -n takaa yksikäsitteisyyden: jos varavahti jo elää,
+  # lukko on varattu → uutta ei käynnisty. Poistuu itse kun päävahdin heartbeat tuoreutuu.
+  setsid flock -n "$STATE/thermal-backup.lock" "$DVDQ_HOME/dvdq" thermal --backup >/dev/null 2>&1 & disown
 }
