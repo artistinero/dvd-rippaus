@@ -143,11 +143,12 @@ job_put() {
 # job_apply <id> <jq_filter> [jq-args...] — CAS-muutos olemassa olevaan jobiin. Asettaa rev=max+1 itse.
 job_apply() {
   local id=$1 filter=$2; shift 2
+  local -a _jqargs=("$@")   # jq-argumentit talteen: sisäkkäisen _do:n $@ EI näe job_applyn positioita
   _do() {
     local oldpath oldstatus newjson
     oldpath=$(_job_find "$id") || { err_out id_not_found id "$id" "olemassa oleva job"; return 1; }
     oldstatus=$(jq -r '.status // empty' "$oldpath")
-    newjson=$(jq "$@" "$filter" "$oldpath") || { err_out bad_state filter "$filter" "kelvollinen jq"; return 1; }
+    newjson=$(jq ${_jqargs[@]+"${_jqargs[@]}"} "$filter" "$oldpath") || { err_out bad_state filter "$filter" "kelvollinen jq"; return 1; }
     # job_put hoitaa rev/dir/counters — mutta olemme jo job-lukossa; kutsu sisälogiikka suoraan
     local newstatus newdir newpath maxrev newrev
     maxrev=$(_job_max_rev "$id"); newrev=$((maxrev+1))
