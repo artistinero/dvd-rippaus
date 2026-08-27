@@ -41,7 +41,7 @@ _disc_done_verified() {
       [ "$(jq -r '.disc_key // empty' "$p")" = "$dk" ] || continue
       [ "$(jq -r '.status' "$p")" = done ] || continue
       f="$(jq -r '.dest_dir' "$p")/$(jq -r '.out_name' "$p")"
-      exp=$(jq -r '.duration_s // ""' "$p"); mina=$(jq -r '(.want_audio//[])|length' "$p")
+      exp=$(jq -r '.duration_s // ""' "$p"); mina=$(jq -r 'if ((.want_audio//[])|length)>0 then 1 else 0 end' "$p")  # R8 alaraja
       verify_structural "$f" "$exp" "$mina" || return 1
     done
   done

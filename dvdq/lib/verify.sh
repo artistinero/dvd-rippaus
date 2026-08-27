@@ -110,6 +110,6 @@ _verify_one() {  # tulosta yhden jobin verify-tulos (id + verify_file)
   j=$(job_read "$id") || { err_out id_not_found id "$id" "olemassa oleva job"; return 1; }
   f="$(printf '%s' "$j" | jq -r '.dest_dir')/$(printf '%s' "$j" | jq -r '.out_name')"
   exp=$(printf '%s' "$j" | jq -r '.duration_s // ""')
-  mina=$(printf '%s' "$j" | jq -r '(.want_audio // []) | length')
+  mina=$(printf '%s' "$j" | jq -r 'if ((.want_audio // [])|length)>0 then 1 else 0 end')  # R8 alaraja
   verify_file "$f" "$exp" "$mina" | jq -c --arg id "$id" '{id:$id} + .'
 }

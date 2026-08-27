@@ -76,7 +76,9 @@ verify_output() {  # <tmp> <id> → 0 ok. §8.4 rakenteellinen verifiointi (veri
   command -v verify_structural >/dev/null 2>&1 || { [ -s "$1" ]; return $?; }   # verify.sh ei sourcattu
   local tmp=$1 id=$2 exp mina
   exp=$(job_field "$id" .duration_s)
-  mina=$(job_read "$id" | jq -r '(.want_audio // []) | length')
+  # R8: verifioinnin alaraja = 1 jos ääntä odotetaan (ei want_audio-pituus, ettei kommenttiheuristiikan
+  # väärinarvio hylkää jobia). §8.4a.
+  mina=$(job_read "$id" | jq -r 'if ((.want_audio // [])|length)>0 then 1 else 0 end')
   verify_structural "$tmp" "${exp:-}" "${mina:-0}"
 }
 
