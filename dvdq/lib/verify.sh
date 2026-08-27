@@ -14,9 +14,13 @@ _vf_stream_count() {  # _vf_stream_count <file> <v|a|s> → raitojen määrä
 _vf_duration() {      # tiedoston kesto sekunteina (desimaali); tyhjä jos ei saatavilla
   ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 "$1" 2>/dev/null | grep -E '^[0-9.]+$' | head -1
 }
-_vf_last_video_pts() {  # viimeisen videopaketin pts (loppupään otos) — ennenaikaisen lopun havaitsemiseen
-  ffprobe -v error -read_intervals '99%' -select_streams v \
-    -show_entries packet=pts_time -of csv=p=0 "$1" 2>/dev/null | grep -E '^[0-9.]+$' | sort -g | tail -1
+_vf_last_video_pts() {  # <file> <exp_dur> — viimeisen videopaketin pts loppupään otoksesta.
+  # read_intervals "START%" = STARTista loppuun. Seek = max(0, kesto-30s) → luetaan viimeiset ~30s
+  # (EI kiinteä '99%', joka olisi 99 s = väärä lyhyille/pitkille tiedostoille). Ennenaikaisen lopun havaitsemiseen.
+  local f=$1 exp=${2:-0} seek
+  seek=$(awk -v e="${exp:-0}" 'BEGIN{s=e-30; if(s<0||e=="")s=0; printf "%d", s}')
+  ffprobe -v error -read_intervals "${seek}%" -select_streams v \
+    -show_entries packet=pts_time -of csv=p=0 "$f" 2>/dev/null | grep -E '^[0-9.]+$' | sort -g | tail -1
 }
 _vf_readable() {      # ffprobe lukee ilman virhettä (tyhjä stderr) → tiedosto ei katkennut/korruptoitunut
   local err; err=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$1" 2>&1 >/dev/null)
@@ -42,7 +46,7 @@ verify_structural() {
     awk -v d="$dur" -v e="$exp" -v t="$tol" 'BEGIN{x=d-e; if(x<0)x=-x; exit !(x<=t)}' \
       || { VERIFY_REASON="kesto $dur poikkeaa odotetusta $exp yli ${tol}s"; return 1; }
     # ennenaikainen loppu: viimeinen videopaketti pitää olla lähellä kestoa (ei tyngä joka osui toleranssiin)
-    lastpts=$(_vf_last_video_pts "$f")
+    lastpts=$(_vf_last_video_pts "$f" "$exp")
     if [ -n "$lastpts" ]; then
       awk -v p="$lastpts" -v e="$exp" 'BEGIN{exit !(p >= e*0.9)}' \
         || { VERIFY_REASON="viimeinen videopaketti $lastpts « kesto $exp (ennenaikainen loppu)"; return 1; }
@@ -85,8 +89,7 @@ cmd_verify() {
   local target=${1-}
   [ -n "$target" ] || { err_out bad_state args "" "id tai --all"; return 1; }
   if [ "$target" = --all ]; then
-    # kohteliaisuus: jos enkoodauksia käynnissä, kieltäydy (aja tyhjälle jonolle)
-    local enc; enc=$(jq -r '.encoding // 0' "$STATE/counters.json" 2>/dev/null)
+    # kohteliaisuus: jos enkoodauksia käynnissä, kieltäydy (aja tyhjälle jonolle / pausen aikana)
     if [ "$(_verify_encoding_running)" -gt 0 ]; then
       err_out bad_state busy running "verify --all vain tyhjälle jonolle / pausen aikana"; return 1
     fi

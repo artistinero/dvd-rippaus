@@ -4,46 +4,60 @@
 # EI set -e (§8.1). Virheet → {"ok":false,...} + rc≠0.
 set -uo pipefail
 
-DVDQ_HOME=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-source "$DVDQ_HOME/lib/common.sh"
-source "$DVDQ_HOME/lib/jobs.sh"
-source "$DVDQ_HOME/lib/commands.sh"
-source "$DVDQ_HOME/lib/verify.sh"
-source "$DVDQ_HOME/lib/cleanup.sh"
-source "$DVDQ_HOME/lib/scan.sh"
-source "$DVDQ_HOME/lib/rip.sh"
-source "$DVDQ_HOME/lib/migrate.sh"
-source "$DVDQ_HOME/lib/thermal.sh"
-source "$DVDQ_HOME/lib/dispatch.sh"
+# Symlinkin kautta käynnistys (README: symlink PATHiin): resolvoi todellinen polku, muuten
+# $DVDQ_HOME osoittaisi symlinkin sijaintiin ja jokainen source epäonnistuisi.
+_self=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null) || _self="${BASH_SOURCE[0]}"
+DVDQ_HOME=$(cd "$(dirname "$_self")" && pwd)
+
+# Bootstrap-virhekuori: source-virhe tapahtuu ENNEN common.sh:ta (ei err_out'ia) → tulosta käsin.
+# Näin §6.1:n kuori säilyy myös keskeytyneen atomisen deployn tilassa (README kohta 3).
+_bootstrap_fail() { printf '{"ok":false,"error":"install_broken","detail":{"file":"%s"}}\n' "$1"; exit 1; }
+for _m in common jobs commands verify cleanup scan rip migrate thermal dispatch; do
+  # shellcheck disable=SC1090
+  source "$DVDQ_HOME/lib/$_m.sh" || _bootstrap_fail "$DVDQ_HOME/lib/$_m.sh"
+done
 
 usage() {
   cat >&2 <<'EOF'
-dvdq <komento> [argumentit]
-  enqueue --source S --title N --kind K --name NIMI [--year Y --season SS --episode EE]
-          [--role main|extra] [--force] [metadata-liput]
-  skip <id> | unskip <id> | retry <id>
-  status [--json]
-  reconcile
-Komennot palauttavat JSON-kuoren stdoutiin (§6.1). Lisää komentoja tulee vaiheittain.
+dvdq <komento> [argumentit] — kaikki palauttavat JSON-kuoren stdoutiin (§6.1)
+  rip <laite>                          rippaa levy + skannaa
+  scan <dvd_dir>                       skannaa tittelit (scans/<sha1>.json)
+  enqueue --source S --title N --kind K --name NIMI [--year --season --episode --role --force]
+  dispatch [--once]                    enkoodausdaemon
+  thermal [--backup]                   lämpövahti
+  status                               tilanne (ok-kuori)
+  review-problematic                   failed/broken-jobit
+  skip|unskip|retry <id>               jonon hallinta
+  ack-quarantine <id>                  kuittaa karanteeni (peruuttamaton, estää retryn)
+  verify [<id>|--all]                  kirjaston jälkitarkistus
+  cleanup [--dry-run]                  lähteen poisto + orpo-tempit + retention
+  migrate --manifest FILE [--dry-run]  vanhan jonon tuonti
+  pause | resume                       pysäytä/jatka uusien slottien avaus
+  reconcile                            käynnistyksen tila-eheytys
 EOF
 }
 
-# Komennot jotka EIVÄT tarvitse NAS-writable-validointia (§5.4): lukukomennot + paikallista tilaa
-# koskevat palvelut. `thermal` koskee vain lokaalia STATEa (heartbeat, job-liput) → ei saa kaatua/
-# jäädä odottamaan NAS-statia, jottei lämpöturva katoa NAS-katkon takia.
 # Paikallista STATEa koskevat komennot ohittavat NAS-writable-validoinnin (§5.4): eivät saa
-# kaatua/jäädä NAS-katkoon (pause/resume ovat hätäohjaus).
-_is_readonly_cmd() { case $1 in status|review-problematic|reconcile|thermal|verify|scan|pause|resume) return 0;; *) return 1;; esac; }
+# kaatua/jäädä NAS-statiin. thermal/pause/resume = hätäohjaus; scan/rip kirjoittavat vain lokaalia
+# (STATE / WORK_DIR), eivät DEST_ROOTia → toimivat myös NAS-katkon aikana.
+_is_readonly_cmd() {
+  case $1 in status|review-problematic|reconcile|thermal|verify|scan|rip|pause|resume) return 0;; *) return 1;; esac
+}
 
 main() {
   local cmd=${1-}; [ $# -gt 0 ] && shift || true
   [ -n "$cmd" ] || { usage; return 2; }
 
+  # Ohje ja tuntematon komento ENNEN config_loadia → toimivat myös ilman configia (tuore asennus).
+  case $cmd in
+    -h|--help|help) usage; return 0 ;;
+  esac
+
   config_load
   config_validate_common || return 1          # AINA (tyypit/välit/ristiriidat)
   state_init_dirs || { err_out dest_unwritable STATE "$STATE" "luotavissa"; return 1; }
   if ! _is_readonly_cmd "$cmd"; then
-    config_validate_writable || return 1        # vain kirjoittajille (NAS-stat)
+    config_validate_writable || return 1        # vain NAS-kirjoittajille (NAS-stat)
   fi
 
   case $cmd in
@@ -53,7 +67,7 @@ main() {
     retry)    cmd_retry "$@" ;;
     status)   cmd_status "$@" ;;
     dispatch) cmd_dispatch "$@" ;;
-    thermal)  [ "${1-}" = --backup ] && thermal_watchdog backup || thermal_watchdog main ;;
+    thermal)  if [ "${1-}" = --backup ]; then thermal_watchdog backup; else thermal_watchdog main; fi ;;
     verify)   cmd_verify "$@" ;;
     cleanup)  cmd_cleanup "$@" ;;
     ack-quarantine) cmd_ack_quarantine "$@" ;;
@@ -64,7 +78,6 @@ main() {
     resume)   cmd_resume ;;
     review-problematic) cmd_review_problematic ;;
     reconcile) reconcile ;;
-    -h|--help|help) usage; return 0 ;;
     *) err_out bad_state command "$cmd" "tunnettu komento"; usage; return 1 ;;
   esac
 }

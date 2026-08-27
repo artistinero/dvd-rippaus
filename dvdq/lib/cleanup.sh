@@ -159,10 +159,13 @@ cmd_ack_quarantine() {
   local st; st=$(job_field "$id" .status)
   case $st in failed|broken) ;; *) err_out bad_state id "$id" "vain failed/broken (nyt: $st)"; return 1;; esac
   job_apply "$id" '.status="abandoned"|.finished=(now|todate)' || return $?
-  # laukaise cleanup vain jos koko levy on nyt siivottavissa
+  # laukaise cleanup VAIN tälle levylle (ei globaali): rajaa suunnitelma disc_key:hen, ettei
+  # ulkopuolisten levyjen lähteitä poisteta käyttäjän pyytämättä (tarkistuksen kohta 2).
   local dk; dk=$(job_field "$id" .disc_key)
   if _disc_cleanable "$dk" && _disc_done_verified "$dk"; then
-    local pl; pl=$(cleanup_plan); cleanup_apply "$pl"
+    local pl; pl=$(cleanup_plan | jq -c --arg dk "$dk" \
+      '{source_deletes:[.source_deletes[]|select(.disc_key==$dk)],orphan_temps:[],backup_expired:[],scans_expired:[]}')
+    cleanup_apply "$pl"
   fi
   ok_out "$(printf '"id":"%s","status":"abandoned","warning":"peruuttamaton: retry ei enää mahdollinen"' "$id")"
 }

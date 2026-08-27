@@ -15,7 +15,8 @@ set -uo pipefail
 # manifestin dest_dir/out_name:a sellaisenaan → migraatio osuu vanhan kirjaston tiedostoihin).
 _migrate_build_job() {
   local e=$1 id=$2 st=$3
-  printf '%s' "$e" | jq -c --arg id "$id" --arg st "$st" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+  local fin=null; [ "$st" = done ] && fin="\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
+  printf '%s' "$e" | jq -c --arg id "$id" --arg st "$st" --argjson fin "$fin" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
     {id:$id,seq:0,rev:0,created:$created,
      source:.source, disc_key:((.source|sub("/VIDEO_TS$";""))|sub("/$";"")),
      title:.title, kind:(.kind//"misc"), role:(.role//"main"), name:.name,
@@ -25,9 +26,9 @@ _migrate_build_job() {
      interlaced:false,crop:null,
      src_subs:(.src_subs//[]),src_audio:(.src_audio//[]),
      want_subs:(.want_subs // .src_subs // []), want_audio:(.want_audio // .src_audio // []),
-     read_errors:0,status:$st,slot:null,pid:null,pgid:null,starttime:null,
+     read_errors:0,status:$st,slot:null,pid:null,pgid:null,pgid_starttime:null,starttime:null,
      skip_requested:false,thermal_kill:false,quality:21,encoder:"x265",audio_codec:"copy",
-     deinterlace:"auto",started:null,finished:null,fail_reason:null,warnings:[],
+     deinterlace:"auto",started:null,finished:$fin,fail_reason:null,warnings:[],
      confidence:"high",alt_main_titles:[]}'
 }
 
@@ -63,19 +64,18 @@ migrate_plan() {
       entries:$en}'
 }
 
-# migrate_apply <manifest_file> — suorita: enqueue (idempotenssi) + done vain verifioidulle.
+# migrate_apply <manifest_file> <plan> — suorita SUUNNITELMAN mukaan (§15 B1: apply tekee sen mitä
+# plan lupasi, EI laske päätöksiä uudelleen → dry-run on aito lupaus). Action luetaan planista id:llä.
+# Record luodaan SUORAAN done/pending-tilaan (ei pending→done-ikkunaa jossa dispatcher voisi napata).
 migrate_apply() {
-  local mf=$1 e act id
+  local mf=$1 plan=$2 e id act
   while IFS= read -r e; do
     [ -n "$e" ] || continue
-    read -r act id < <(_migrate_action "$e")
+    id=$(job_id "$(printf '%s' "$e" | jq -r '.source')" "$(printf '%s' "$e" | jq -r '.title')")
+    act=$(printf '%s' "$plan" | jq -r --arg id "$id" '.entries[]|select(.id==$id)|.action' | head -1)
     case $act in
-      skip) ;;                                             # id jo olemassa (idempotenssi/§14 R4)
-      done)
-        job_put "$id" "$(_migrate_build_job "$e" "$id" pending)" >/dev/null 2>&1
-        job_apply "$id" '.status="done"|.finished=(now|todate)' >/dev/null 2>&1 ;;
-      pending)
-        job_put "$id" "$(_migrate_build_job "$e" "$id" pending)" >/dev/null 2>&1 ;;
+      done|pending) job_put "$id" "$(_migrate_build_job "$e" "$id" "$act")" >/dev/null 2>&1 ;;
+      *) ;;                                                # skip / tuntematon → ei kirjoiteta
     esac
   done < "$mf"
 }
@@ -87,6 +87,6 @@ cmd_migrate() {
   [ -n "$mf" ] && [ -f "$mf" ] || { err_out bad_state manifest "$mf" "--manifest FILE pakollinen"; return 1; }
   local plan; plan=$(migrate_plan "$mf")
   if [ "$dry" = 1 ]; then ok_out "$(printf '"dry_run":true,"plan":%s' "$plan")"; return 0; fi
-  migrate_apply "$mf"
+  migrate_apply "$mf" "$plan"     # suorita SAMA suunnitelma (ei uudelleenlaskentaa)
   ok_out "$(printf '"plan":%s' "$plan")"
 }

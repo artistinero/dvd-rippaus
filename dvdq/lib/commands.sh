@@ -110,7 +110,7 @@ cmd_enqueue() {
       format:(($format|select(.!="")) // null),
       interlaced:$interlaced,crop:(($crop|select(.!="")) // null),
       src_subs:$src_subs,src_audio:$src_audio,want_subs:$want_subs,want_audio:$want_audio,
-      read_errors:0,status:"pending",slot:null,pid:null,pgid:null,starttime:null,
+      read_errors:0,status:"pending",slot:null,pid:null,pgid:null,pgid_starttime:null,starttime:null,
       skip_requested:false,thermal_kill:false,quality:$crf,encoder:$encoder,audio_codec:"copy",
       deinterlace:"auto",started:null,finished:null,fail_reason:null,warnings:[],
       confidence:"high",alt_main_titles:[]}')
@@ -147,12 +147,12 @@ cmd_unskip() {
   local id=${1-}; [ -n "$id" ] || { err_out bad_state args "" "id pakollinen"; return 1; }
   job_exists "$id" || { err_out id_not_found id "$id" "olemassa oleva job"; return 1; }
   local dk; dk=$(job_field "$id" .disc_key)
-  _do() {
+  _us_do() {
     [ "$(job_field "$id" .status)" = user_skip ] || { err_out bad_state id "$id" "vain user_skip"; return 1; }
     _require_source "$id" || { err_out source_missing disc_key "$dk" "lähde olemassa (retry/unskip vaatii)"; return 1; }
     job_apply "$id" '.status="pending" | .finished=null'
   }
-  with_lock "$(_disc_lock "$dk")" _do || return $?
+  with_lock "$(_disc_lock "$dk")" _us_do || return $?
   ok_out "$(printf '"id":"%s"' "$id")"
 }
 
@@ -160,13 +160,13 @@ cmd_retry() {
   local id=${1-}; [ -n "$id" ] || { err_out bad_state args "" "id pakollinen"; return 1; }
   job_exists "$id" || { err_out id_not_found id "$id" "olemassa oleva job"; return 1; }
   local dk; dk=$(job_field "$id" .disc_key)
-  _do() {
+  _rt_do() {
     local st; st=$(job_field "$id" .status)
     [ "$st" = failed ] || [ "$st" = broken ] || { err_out bad_state id "$id" "vain failed/broken"; return 1; }
     _require_source "$id" || { err_out source_missing disc_key "$dk" "lähde olemassa (retry vaatii)"; return 1; }
     job_apply "$id" '.status="pending" | .fail_reason=null | .thermal_kill=false'
   }
-  with_lock "$(_disc_lock "$dk")" _do || return $?
+  with_lock "$(_disc_lock "$dk")" _rt_do || return $?
   ok_out "$(printf '"id":"%s"' "$id")"
 }
 
@@ -196,7 +196,11 @@ dispatcher_alive() {   # true jos dispatch.pid-flock on jonkun hallussa
 # (du NAS:illa) ovat KALLIITA, joten ne lasketaan vain ihmisen/GUI:n `status`-kutsulla ja OHITETAAN
 # dispatcherin tiheässä write_status-kirjoituksessa (--fast). Best-effort: mukana vain jos
 # cleanup.sh sourcattu (guard command -v).
-cmd_status() {
+# cmd_status — §6.1-kuori (ok:true + statuskentät). Lukukomennon vastaus GUI:lle.
+cmd_status() { _status_json "$@" | jq -c '{ok:true} + .'; }
+# _status_json [--fast] — RAAKA statusobjekti (ilman ok-kuorta). Dispatcher kirjoittaa tämän
+# status.json:iin (write_status) — se on johdettu näkymä, ei komentovastaus.
+_status_json() {
   local fast=0; [ "${1-}" = --fast ] && fast=1
   local cp; cp=$(_counters_path)
   local counters='{"pending":0,"encoding":0,"failed":0,"broken":0,"done":0,"user_skip":0,"abandoned":0,"state_rev":0}'

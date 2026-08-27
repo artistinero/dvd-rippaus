@@ -52,7 +52,7 @@ _job_max_rev() {
 _counters_path() { printf '%s/counters.json' "$STATE"; }
 
 counters_recompute() {   # reconcile: laske counters täydellä skannauksella (§3)
-  _do() {
+  _cr_do() {
     local d p st
     declare -A c=( [pending]=0 [encoding]=0 [failed]=0 [broken]=0 [done]=0 [user_skip]=0 [abandoned]=0 )
     while read -r d; do
@@ -71,14 +71,14 @@ counters_recompute() {   # reconcile: laske counters täydellä skannauksella (�
       '{pending:$p,encoding:$e,failed:$f,broken:$b,done:$d,user_skip:$u,abandoned:$a,state_rev:$sr}' \
       | write_json_atomic "$(_counters_path)"
   }
-  with_lock "$(lock_dir)/counters.lock" _do
+  with_lock "$(lock_dir)/counters.lock" _cr_do
 }
 
 # counters_bump <from|-> <to|-> — säädä laskureita + kasvata state_rev. "-" = ei tilaluokan muutosta.
 # Kutsutaan aina rev++:n yhteydessä (§15 B3: state_rev kasvaa JOKAISELLA rev++:lla, myös kun luvut ei muutu).
 counters_bump() {
   local from=$1 to=$2
-  _do() {
+  _cb_do() {
     local cp; cp=$(_counters_path)
     [ -f "$cp" ] || printf '{"pending":0,"encoding":0,"failed":0,"broken":0,"done":0,"user_skip":0,"abandoned":0,"state_rev":0}' | write_json_atomic "$cp"
     local filter='.state_rev += 1'
@@ -86,7 +86,7 @@ counters_bump() {
     [ "$to" != "-" ]   && filter="$filter | .$to = ((.$to // 0) + 1)"
     jq "$filter" "$cp" | write_json_atomic "$cp"
   }
-  with_lock "$(lock_dir)/counters.lock" _do
+  with_lock "$(lock_dir)/counters.lock" _cb_do
 }
 
 state_rev_get() { jq -r '.state_rev // 0' "$(_counters_path)" 2>/dev/null || echo 0; }
@@ -160,7 +160,7 @@ next_extra_number() {
 # status-kentän mukaan, poistaa vanhan sijainnin jos luokka vaihtui. Päivittää counters + state_rev.
 job_put() {
   local id=$1 json=$2
-  _do() {
+  _jp_do() {
     local oldpath oldstatus newstatus newdir newpath maxrev newrev
     oldpath=$(_job_find "$id" 2>/dev/null) || oldpath=""
     oldstatus=""; [ -n "$oldpath" ] && oldstatus=$(jq -r '.status // empty' "$oldpath")
@@ -181,14 +181,14 @@ job_put() {
       "$(printf '%s' "$json" | jq -r '.finished // ""')" "$newstatus"
     return 0
   }
-  with_lock "$(lock_dir)/job-$id.lock" _do
+  with_lock "$(lock_dir)/job-$id.lock" _jp_do
 }
 
 # job_apply <id> <jq_filter> [jq-args...] — CAS-muutos olemassa olevaan jobiin. Asettaa rev=max+1 itse.
 job_apply() {
   local id=$1 filter=$2; shift 2
   local -a _jqargs=("$@")   # jq-argumentit talteen: sisäkkäisen _do:n $@ EI näe job_applyn positioita
-  _do() {
+  _ja_do() {
     local oldpath oldstatus newjson
     oldpath=$(_job_find "$id") || { err_out id_not_found id "$id" "olemassa oleva job"; return 1; }
     oldstatus=$(jq -r '.status // empty' "$oldpath")
@@ -210,7 +210,7 @@ job_apply() {
       "$(printf '%s' "$newjson" | jq -r '.finished // ""')" "$newstatus"
     return 0
   }
-  with_lock "$(lock_dir)/job-$id.lock" _do
+  with_lock "$(lock_dir)/job-$id.lock" _ja_do
 }
 
 # =============================================================================

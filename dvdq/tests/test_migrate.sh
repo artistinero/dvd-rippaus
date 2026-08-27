@@ -55,6 +55,18 @@ cmd_migrate --manifest "$MF" >/dev/null
 # A pysyy done (ei ylikirjoiteta pendingiksi)
 [ "$(job_field "$idA" .status)" = done ] && ok "A pysyy done uusiajossa (skip)" || bad "A rerun" "$(job_field "$idA" .status)"
 
+echo "== §15 B1: apply NOUDATTAA suunnitelmaa (ei laske uudelleen) =="
+# plan sanoo done; kirjasto muuttuu plan↔apply välissä; apply tekee silti sen mitä plan lupasi
+MF2="$TESTROOT/m2.jsonl"
+mkdir -p "$TESTROOT/dest/movies/D (2003)"; printf DATA > "$TESTROOT/dest/movies/D (2003)/D.mkv"
+jq -cn '{source:"/src/disc-9/VIDEO_TS",title:1,kind:"movie",name:"D",year:"2003",dest_dir:"'"$TESTROOT"'/dest/movies/D (2003)",out_name:"D.mkv",duration_s:100,src_audio:["eng"]}' > "$MF2"
+plan=$(migrate_plan "$MF2")
+[ "$(printf '%s' "$plan"|jq -r '.done')" = 1 ] && ok "plan: D → done" || bad "planD" "$plan"
+rm -f "$TESTROOT/dest/movies/D (2003)/D.mkv"          # kirjasto muuttuu plan- ja apply-kutsun VÄLISSÄ
+migrate_apply "$MF2" "$plan"
+idD=$(job_id /src/disc-9/VIDEO_TS 1)
+[ "$(job_field "$idD" .status)" = done ] && ok "apply noudattaa suunnitelmaa (done), EI laske uudelleen" || bad "planapply" "$(job_field "$idD" .status)"
+
 echo "== lähde säilyy (migraatio ei poista; §9 kohta 4 = cleanup erikseen) =="
 # (migraatio ei kosketa lähteitä — tämä on suunniteltua; poisto on cleanupin vastuulla)
 ok "migraatio ei poista lähteitä (cleanup hoitaa §9/4)"

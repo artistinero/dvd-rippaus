@@ -62,14 +62,48 @@ DEST_TMP() { printf '%s/.tmp' "${CFG[DEST_ROOT]}"; }
 # encoder_start <slotfd> <id> <source> <title> <out_tmp> → tulostaa enkooderin pgid:n (setsid-leader).
 # <slotfd> suljetaan enkooderilta ({fd}>&-) ettei se peri slot-lukkoa (muuten "slot held" valehtelisi
 # workerin kuoltua). Enkooderi omassa sessiossaan (setsid → oma pgid) lämpövahtia/reapia varten.
+# KRIITTINEN: enkooderi käynnistetään workerin SUORANA lapsena, EI $()-komentokorvauksessa.
+# Komentokorvaus ajaisi setsidin aliprosessissa → enkooderi reparentoituisi initille → workerin
+# `wait` epäonnistuisi (rc 127) → JOKAINEN job failed + temp poistettu kesken kirjoituksen + slot
+# vapautuisi vaikka enkooderi jatkaa. Siksi funktio ASETTAA globaalin ENCODER_PID:n, ei tulosta.
+# Non-interactive daemon: setsid execaa (ei forkkaa) → $! = enkooderin pid = pgid (session leader).
+ENCODER_PID=0
 encoder_start() {
-  local sfd=$1; shift
+  local sfd=$1 id=$2 src=$3 title=$4 tmp=$5
   mkdir -p "$(DEST_TMP)"
+  # setsid → oma sessio/pgid (lämpö-STOP/reap). DVDQ_NO_SETSID: TESTIHOOK — ilman setsidiä (sandbox
+  # ei salli setsid-prosesseja); tuotannossa setsid aina päällä. Komento kootaan taulukkoon ja
+  # käynnistetään KERRAN taustalle → $! = enkooderi (=pgid), workerin suora lapsi (wait toimii).
+  local -a pre=(setsid); [ -n "${DVDQ_NO_SETSID:-}" ] && pre=()
+  local -a cmd
   if [ -n "${DVDQ_STUB_ENCODER:-}" ]; then
-    setsid "$DVDQ_STUB_ENCODER" "$@" >/dev/null 2>&1 {sfd}>&- & printf '%s' "$!"
+    cmd=("${pre[@]}" "$DVDQ_STUB_ENCODER" "$id" "$src" "$title" "$tmp")
   else
-    setsid false >/dev/null 2>&1 {sfd}>&- & printf '%s' "$!"   # oikea HandBrake vaiheessa 7
+    local -a hb; _hb_build hb "$id" "$src" "$title" "$tmp"
+    cmd=("${pre[@]}" HandBrakeCLI "${hb[@]}")
   fi
+  "${cmd[@]}" >/dev/null 2>&1 {sfd}>&- &
+  ENCODER_PID=$!
+}
+
+# _hb_build <arrayname> <id> <src> <title> <tmp> — kokoa HandBrakeCLI-argumentit jobin metadatasta
+# (§8.3 raitapolitiikka, CRF/ENCODER, crop, deinterlace). VALIDOITAVA brainbinilla oikealla levyllä
+# (mm. tekstitysten synkka; HandBrake hoitaa DVD-VobSubin NAV-ajastuksen libdvdread/nav-pohjaisesti).
+_hb_build() {
+  local -n _out=$1; local id=$2 src=$3 title=$4 tmp=$5 j
+  j=$(job_read "$id")
+  local crf enc crop deint wa ws
+  crf=$(printf '%s' "$j" | jq -r '.quality // 21')
+  enc=$(printf '%s' "$j" | jq -r '.encoder // "x265"')
+  crop=$(printf '%s' "$j" | jq -r '.crop // empty')
+  deint=$(printf '%s' "$j" | jq -r '.deinterlace // "auto"')
+  wa=$(printf '%s' "$j" | jq -r '(.want_audio // []) | join(",")')
+  ws=$(printf '%s' "$j" | jq -r '(.want_subs  // []) | join(",")')
+  _out=( -i "$src" --title "$title" -o "$tmp" -f av_mkv -e "$enc" -q "$crf" )
+  [ -n "$wa" ] && _out+=( --audio-lang-list "$wa" --all-audio ) || _out+=( -a 1 )
+  [ -n "$ws" ] && _out+=( --subtitle-lang-list "$ws" --all-subtitles )
+  [ -n "$crop" ] && _out+=( --crop "$crop" )
+  case $deint in auto) _out+=( --comb-detect --decomb );; on) _out+=( --deinterlace );; esac
 }
 verify_output() {  # <tmp> <id> → 0 ok. §8.4 rakenteellinen verifiointi (verify.sh).
   if [ -n "${DVDQ_STUB_VERIFY:-}" ]; then "$DVDQ_STUB_VERIFY" "$@"; return $?; fi
@@ -92,11 +126,13 @@ worker_run() {
   if ! flock -n "$WFD"; then _release_reservation "$id"; exit 0; fi   # ristikäytäntö-race: vapauta varaus
   local src title tmp epid starttime
   src=$(job_field "$id" .source); title=$(job_field "$id" .title); tmp="$(DEST_TMP)/$id.mkv"
-  epid=$(encoder_start "$WFD" "$id" "$src" "$title" "$tmp")
+  encoder_start "$WFD" "$id" "$src" "$title" "$tmp"   # asettaa ENCODER_PID (ei $()-korvausta!)
+  epid=$ENCODER_PID
   starttime=$(proc_starttime "$BASHPID")
+  local pgst; pgst=$(proc_starttime "$epid")          # enkooderi(=pgid-leader)n käynnistysaika reapin identiteettitarkistukseen
   job_apply "$id" \
-    '.pid=$pid|.pgid=$pgid|.starttime=$stt|.started=(now|todate)' \
-    --argjson pid "$BASHPID" --argjson pgid "$epid" --arg stt "$starttime" >/dev/null 2>&1
+    '.pid=$pid|.pgid=$pgid|.pgid_starttime=$pgst|.starttime=$stt|.started=(now|todate)' \
+    --argjson pid "$BASHPID" --argjson pgid "$epid" --arg pgst "$pgst" --arg stt "$starttime" >/dev/null 2>&1
   wait "$epid"; local erc=$?
   _worker_commit "$id" "$tmp" "$erc"
   exit 0
@@ -126,12 +162,22 @@ _worker_commit() {  # <id> <tmp> <erc>  — commitoi tulos (§2.5 rc-käsittely,
       local dest_dir out_name dest
       dest_dir=$(job_field "$id" .dest_dir); out_name=$(job_field "$id" .out_name)
       dest="$dest_dir/$out_name"; mkdir -p "$dest_dir"
-      # §8.6: varmuuskopioi mahdollinen vanha versio (audit ENNEN) — jos backup epäonnistuu, EI
-      # ylikirjoiteta (datahävikin esto). §2.1/§2.5: sama fs, sync -d tiedosto, mv, sync hakemisto.
-      if _backup_existing_dest "$dest" && sync_file "$tmp" && mv -f "$tmp" "$dest" && sync_dir "$dest_dir"; then
-        job_apply "$id" '.status="done"|.finished=(now|todate)|.slot=null|.pid=null|.pgid=null' >/dev/null 2>&1
+      # §2.5 kestävyysjärjestys VAIHEITTAIN — rc erottaa kolme eri virhettä (EI &&-niputusta):
+      if ! _backup_existing_dest "$dest"; then                     # vanhaa ei saa ylikirjoittaa
+        job_apply "$id" '.status="failed"|.fail_reason="backup"|.slot=null|.pid=null|.pgid=null' >/dev/null 2>&1
+      elif ! sync_file "$tmp"; then                                # vaihe 1: data ei kestävä (ennen mv)
+        rm -f "$tmp"; job_apply "$id" '.status="failed"|.fail_reason="sync_tmp"|.slot=null|.pid=null|.pgid=null' >/dev/null 2>&1
       else
-        job_apply "$id" '.status="failed"|.fail_reason="mv/sync/backup"|.slot=null|.pid=null|.pgid=null' >/dev/null 2>&1
+        sync_dir "$(DEST_TMP)"                                     # vaihe 2: temp-hakemisto pysyväksi
+        if ! mv -f "$tmp" "$dest"; then                           # vaihe 3: rename
+          rm -f "$tmp"; job_apply "$id" '.status="failed"|.fail_reason="mv"|.slot=null|.pid=null|.pgid=null' >/dev/null 2>&1
+        elif ! sync_dir "$dest_dir"; then
+          # vaihe 4 (renamen JÄLKEEN) epäonnistui: tiedosto on paikallaan mutta ei varmistettu →
+          # ÄLÄ kirjoita done'ia → pending, uudelleenajo korvaa saman tiedoston idempotentisti (§2.5).
+          job_apply "$id" '.status="pending"|.slot=null|.pid=null|.pgid=null|.starttime=null|.started=null' >/dev/null 2>&1
+        else
+          job_apply "$id" '.status="done"|.finished=(now|todate)|.slot=null|.pid=null|.pgid=null' >/dev/null 2>&1
+        fi
       fi
     else
       rm -f "$tmp"; job_apply "$id" '.status="failed"|.fail_reason="verify"|.slot=null|.pid=null|.pgid=null' >/dev/null 2>&1
@@ -150,7 +196,7 @@ _worker_commit() {  # <id> <tmp> <erc>  — commitoi tulos (§2.5 rc-käsittely,
 
 # --- toipuminen (§4: neljä tapausta, slot-lukko totuutena) -------------------------------------
 recover() {
-  local p id slot pgid pid stt
+  local p id slot pgid pgst
   for p in "$STATE/jobs"/*.json; do
     [ -e "$p" ] || continue
     [ "$(jq -r '.status' "$p")" = encoding ] || continue
@@ -158,11 +204,15 @@ recover() {
     if [ -n "$slot" ] && slot_held "$slot"; then
       continue   # A: slot-lukko varattu → worker elää → älä koske
     fi
-    # B/C/D: slot vapaa → worker kuollut. Reap mahdollinen orpo-enkooderi pgid:n kautta, poista temp.
-    pgid=$(jq -r '.pgid // empty' "$p")
-    [ -n "$pgid" ] && [ "$pgid" != null ] && kill -TERM -"$pgid" 2>/dev/null
+    # B/C/D: slot vapaa → worker kuollut. Reap orpo-enkooderi VAIN jos (pgid,starttime) yhä täsmää
+    # (§4 identiteettitarkistus proc_alive_same) — muuten pgid-numero on voitu uudelleenkäyttää
+    # (reboot/PID-reuse) ja tappaisi ulkopuolisen prosessin.
+    pgid=$(jq -r '.pgid // empty' "$p"); pgst=$(jq -r '.pgid_starttime // empty' "$p")
+    if [ -n "$pgid" ] && [ "$pgid" != null ] && proc_alive_same "$pgid" "$pgst"; then
+      kill -TERM -"$pgid" 2>/dev/null
+    fi
     rm -f "$(DEST_TMP)/$id.mkv"
-    job_apply "$id" '.status="pending"|.slot=null|.pid=null|.pgid=null|.starttime=null|.started=null' >/dev/null 2>&1
+    job_apply "$id" '.status="pending"|.slot=null|.pid=null|.pgid=null|.pgid_starttime=null|.starttime=null|.started=null' >/dev/null 2>&1
   done
 }
 
@@ -171,7 +221,7 @@ _next_pending_id() {  # pienin seq pending ensin (§8.1 sivuhuomio)
   local p; for p in "$STATE/jobs"/*.json; do [ -e "$p" ] || continue;
     jq -r 'select(.status=="pending")|"\(.seq) \(.id)"' "$p" 2>/dev/null; done | sort -n | head -1 | awk '{print $2}'
 }
-write_status() { cmd_status --fast > "$STATE/status.json.t" 2>/dev/null && mv -f "$STATE/status.json.t" "$STATE/status.json"; }
+write_status() { _status_json --fast > "$STATE/status.json.t" 2>/dev/null && mv -f "$STATE/status.json.t" "$STATE/status.json"; }
 
 # reserve_job <id> <slot> — atominen pending→encoding varaus (§2.6). Estää saman jobin
 # kaksoiskäytön: kun tila on encoding, _next_pending_id ei enää palauta sitä.

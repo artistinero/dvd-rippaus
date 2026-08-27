@@ -21,8 +21,9 @@ DIR_DOCS=documentaries
 DIR_MUSIC=music
 DIR_MISC=misc
 WORK_DIR=/home/keitsi/dvd-rip-tmp
-# BACKUP_DIR ja WORK_DIR/state pidetään kirjaston/skannauksen ULKOPUOLELLA
-BACKUP_DIR=/mnt/terastation/dlna/desync-backups
+# BACKUP_DIR pidetään mediapalvelimen KOKO skannauspuun ulkopuolella (R7): jos kirjastojuuri on
+# /mnt/terastation/dlna, älä laita varmuuskopioita sen sisään — muuten ne indeksoituvat.
+BACKUP_DIR=/mnt/terastation/dvdq-backups
 BACKUP_RETENTION_DAYS=30
 SCAN_TTL_DAYS=14
 

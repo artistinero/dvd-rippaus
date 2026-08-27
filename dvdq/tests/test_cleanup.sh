@@ -85,11 +85,14 @@ idp=$(mkjob d7 1 pending)    # velka
 [ "$(encode_debt_bytes)" -gt 0 ] && ok "encode_debt_bytes > 0 (pending)" || bad "edb" "$(encode_debt_bytes)"
 
 echo "== ack-quarantine → abandoned, retry estetty, lähde poistettavissa =="
+# ULKOPUOLINEN levy B (valmis, siivottavissa) — ack (levy d6) EI SAA poistaa sen lähdettä (bug #2)
+mkjob dB 1 done 1 >/dev/null
 out=$(cmd_ack_quarantine "$idf")
 [ "$(job_field "$idf" .status)" = abandoned ] && ok "failed → abandoned" || bad "ack" "$(job_field "$idf" .status)"
 printf '%s' "$out" | jq -e '.warning' >/dev/null && ok "ack varoittaa peruuttamattomuudesta" || bad "ackwarn" "$out"
 rout=$(cmd_retry "$idf" 2>/dev/null); [ "$(printf '%s' "$rout"|jq -r .error)" = bad_state ] && ok "retry estetty abandonedille" || bad "retryblock" "$rout"
 [ ! -d "$TESTROOT/discs/d6" ] && ok "abandoned-levyn lähde siivottu (ack laukaisi cleanupin)" || bad "ackcleanup" "jäi"
+[ -d "$TESTROOT/discs/dB" ] && ok "ULKOPUOLISEN levyn B lähde SÄILYI (ack ei ole globaali)" || bad "ackscope" "B poistettiin!"
 
 echo
 echo "YHTEENVETO: $PASS ok, $FAIL FAIL"
