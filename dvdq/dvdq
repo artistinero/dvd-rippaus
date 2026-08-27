@@ -12,6 +12,7 @@ source "$DVDQ_HOME/lib/verify.sh"
 source "$DVDQ_HOME/lib/cleanup.sh"
 source "$DVDQ_HOME/lib/scan.sh"
 source "$DVDQ_HOME/lib/rip.sh"
+source "$DVDQ_HOME/lib/migrate.sh"
 source "$DVDQ_HOME/lib/thermal.sh"
 source "$DVDQ_HOME/lib/dispatch.sh"
 
@@ -56,6 +57,7 @@ main() {
     ack-quarantine) cmd_ack_quarantine "$@" ;;
     scan)     cmd_scan "$@" ;;
     rip)      cmd_rip "$@" ;;
+    migrate)  cmd_migrate "$@" ;;
     reconcile) reconcile ;;
     -h|--help|help) usage; return 0 ;;
     *) err_out bad_state command "$cmd" "tunnettu komento"; usage; return 1 ;;
