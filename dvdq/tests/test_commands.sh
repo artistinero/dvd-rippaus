@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# tests/test_commands.sh — §6.2 enqueue/skip/unskip/retry/status CLI-binäärin kautta.
+set -u
+HERE=$(cd "$(dirname "$0")" && pwd)
+DVDQ="$HERE/../dvdq"
+
+TESTROOT=$(mktemp -d); trap 'rm -rf "$TESTROOT"' EXIT
+export DVDQ_CONFIG="$TESTROOT/config"
+mkdir -p "$TESTROOT/work" "$TESTROOT/dest" "$TESTROOT/src/disc-1"
+printf '%s\n' "WORK_DIR=$TESTROOT/work" "DEST_ROOT=$TESTROOT/dest" > "$DVDQ_CONFIG"
+
+PASS=0; FAIL=0
+ok(){ PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
+bad(){ FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1  ($2)"; }
+# run: aja dvdq, talleta stdout->$OUT ja rc->$RC
+run(){ OUT=$("$DVDQ" "$@" 2>/dev/null); RC=$?; }
+jqget(){ printf '%s' "$OUT" | jq -r "$1" 2>/dev/null; }
+
+echo "== enqueue =="
+run enqueue --source "$TESTROOT/src/disc-1/VIDEO_TS" --title 11 --kind movie --name Fargo --year 1996 --duration 5640
+[ "$RC" = 0 ] && [ "$(jqget .ok)" = true ] && ok "enqueue ok" || bad "enqueue ok" "$OUT"
+ID=$(jqget .id); SEQ=$(jqget .seq)
+[ -n "$ID" ] && ok "enqueue palauttaa id" || bad "enqueue palauttaa id" "$OUT"
+[ "$SEQ" = 1 ] && ok "seq=1" || bad "seq=1" "$SEQ"
+run status
+[ "$(jqget .pending)" = 1 ] && ok "status pending=1" || bad "status pending=1" "$OUT"
+
+echo "== enqueue idempotenssi =="
+run enqueue --source "$TESTROOT/src/disc-1/VIDEO_TS" --title 11 --kind movie --name Fargo
+[ "$RC" != 0 ] && [ "$(jqget .error)" = id_exists ] && ok "sama id → id_exists" || bad "id_exists" "$OUT"
+run enqueue --source "$TESTROOT/src/disc-1/VIDEO_TS" --title 11 --kind movie --name Fargo --force
+[ "$RC" = 0 ] && [ "$(jqget .seq)" = 1 ] && ok "--force säilyttää seq=1" || bad "--force seq" "$OUT"
+
+echo "== skip / encoding-haara =="
+run skip "$ID"
+[ "$RC" = 0 ] && ok "skip pending ok" || bad "skip pending" "$OUT"
+run status
+[ "$(jqget .user_skip)" = 1 ] && [ "$(jqget .pending)" = 0 ] && ok "→ user_skip" || bad "user_skip" "$OUT"
+# skip terminaalille → bad_state
+run skip "$ID"
+[ "$RC" != 0 ] && [ "$(jqget .error)" = bad_state ] && ok "skip user_skip → bad_state" || bad "skip terminaali" "$OUT"
+
+echo "== unskip vaatii lähteen (§4) =="
+run unskip "$ID"
+[ "$RC" = 0 ] && ok "unskip (lähde olemassa) ok" || bad "unskip ok" "$OUT"
+run status; [ "$(jqget .pending)" = 1 ] && ok "→ pending" || bad "pending" "$OUT"
+# poista lähde → unskip epäonnistuu
+run skip "$ID"
+rm -rf "$TESTROOT/src/disc-1"
+run unskip "$ID"
+[ "$RC" != 0 ] && [ "$(jqget .error)" = source_missing ] && ok "lähde poissa → source_missing" || bad "source_missing" "$OUT"
+mkdir -p "$TESTROOT/src/disc-1"   # palauta
+
+echo "== retry vaatii lähteen =="
+# tee failed-job käsin ei onnistu CLI:stä; simuloi enqueue + manuaalinen tila
+run enqueue --source "$TESTROOT/src/disc-1/VIDEO_TS" --title 12 --kind movie --name Brazil
+ID2=$(jqget .id)
+# aseta failed suoraan tiedostoon (dispatcher tekisi tämän) — käytä kirjastoa
+( source "$HERE/../lib/common.sh"; source "$HERE/../lib/jobs.sh"; export DVDQ_CONFIG; config_load
+  job_apply "$ID2" '.status="failed"|.fail_reason="testi"' >/dev/null 2>&1 )
+run retry "$ID2"
+[ "$RC" = 0 ] && ok "retry failed (lähde olemassa) ok" || bad "retry ok" "$OUT"
+run status; [ "$(jqget .pending)" -ge 1 ] && ok "retry → pending" || bad "retry pending" "$OUT"
+
+echo "== §5.4 lukukomento ei kaadu NAS-statiin (GUI-ystävällisyys) =="
+printf '%s\n' "WORK_DIR=$TESTROOT/work" "DEST_ROOT=$TESTROOT/ei-ole-nas" > "$DVDQ_CONFIG"
+run status
+[ "$RC" = 0 ] && ok "status toimii vaikka DEST_ROOT puuttuu" || bad "status readonly" "$OUT"
+run enqueue --source "$TESTROOT/src/disc-1/VIDEO_TS" --title 13 --kind movie --name X
+[ "$RC" != 0 ] && [ "$(jqget .error)" = dest_unwritable ] && ok "kirjoittaja kieltäytyy DEST puuttuessa" || bad "writer dest_unwritable" "$OUT"
+printf '%s\n' "WORK_DIR=$TESTROOT/work" "DEST_ROOT=$TESTROOT/dest" > "$DVDQ_CONFIG"
+
+echo "== §5.4 kelvoton config → kaikki kieltäytyy =="
+printf '%s\n' "PARALLEL=0" > "$DVDQ_CONFIG"
+run status
+[ "$RC" != 0 ] && [ "$(jqget .error)" = config_invalid ] && ok "PARALLEL=0 → config_invalid" || bad "config_invalid" "$OUT"
+
+echo
+echo "YHTEENVETO: $PASS ok, $FAIL FAIL"
+[ "$FAIL" -eq 0 ]
