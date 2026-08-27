@@ -167,8 +167,11 @@ state_init_dirs() {   # luo paikalliset tilahakemistot (§3)
 }
 
 # with_lock <lockfile> <cmd...> — aja komento flockin sisällä (§2.3). Palauttaa cmd:n rc:n.
+# __lfd on LOCAL: sisäkkäinen lukitus (esim. job-lukko → counters-lukko) ei saa ylikirjoittaa
+# ulomman lukon fd-numeroa, muuten ulompi lukko jäisi vapauttamatta (→ lock_timeout).
 with_lock() {
   local lf=$1; shift
+  local __lfd   # tyhjä → bash allokoi uuden fd:n; local → ei sotke sisäkkäisiä kutsuja
   mkdir -p "$(dirname "$lf")" 2>/dev/null
   exec {__lfd}>>"$lf" || return 70
   if ! flock -w 30 "$__lfd"; then exec {__lfd}>&-; err_out lock_timeout LOCK "$lf" "vapautuu 30s"; return 75; fi
