@@ -130,13 +130,17 @@ valtuuttaa lähde-VOBien poiston (§4), tämä ei ole hyväksyttävää.**
 
 Näin `done` ei koskaan ehdi levylle ennen kohdetiedostoa. Sama järjestys `$BACKUP_DIR`-varmuuskopiolle.
 
-**`sync`-epäonnistumisen käsittely (kohta 1) — kolme eri käytöstä, ei yhtä sääntöä:**
+**`sync`-epäonnistumisen käsittely (kohta 1) — kolme eri käytöstä, ei yhtä sääntöä.** **Huom:
+vaiheet 1–4 koskevat MKV-tiedostoa, jonka HandBrake kirjoittaa ja worker synkkaa suoraan — tämä EI
+kulje `write_json_atomic`in kautta** (se on JSON-tilakirjoituksille; vain vaihe 5 käyttää sitä).
+Worker toteuttaa mediapolulle **saman rc-konvention** kuin §2.2 (`2` = ennen `mv`:tä, `3` = renamen
+jälkeen):
 
 | Kohta | Jos `sync` epäonnistuu |
 |---|---|
-| vaiheet 1–2 (ennen `mv`:tä; funktion rc `2`) | Keskeytä, poista temp, job → `failed`. Mitään ei tapahtunut, kirjastoa ei kosketa. |
-| vaihe 4 (`sync dest_dir` renamen jälkeen; rc `3`) | Ei voi keskeyttää — tiedosto on jo paikallaan. **ÄLÄ kirjoita `done`ia** (job jää `encoding`→reclaimin kautta `pending`). Toipuminen turvallinen: uudelleenenkoodaus korvaa saman tiedoston idempotentisti ja lähde on yhä olemassa (ei siivottu koska ei `done`). |
-| §2.2 kanoninen funktio | Nostaa `sync`in rc:n paluuarvoon (`2`/`3`), kutsuja tietää ettei kirjoitus ole kestävä. |
+| vaiheet 1–2 (MKV, ennen `mv`:tä; rc-konventio `2`) | Keskeytä, poista temp, job → `failed`. Mitään ei tapahtunut, kirjastoa ei kosketa. |
+| vaihe 4 (`sync dest_dir` renamen jälkeen; rc-konventio `3`) | Ei voi keskeyttää — tiedosto on jo paikallaan. **ÄLÄ kirjoita `done`ia** (job jää `encoding`→reclaimin kautta `pending`). Toipuminen turvallinen: uudelleenenkoodaus korvaa saman tiedoston idempotentisti ja lähde on yhä olemassa (ei siivottu koska ei `done`). |
+| vaihe 5 (`done`-JSON, `write_json_atomic`) | Funktio nostaa `sync`in rc:n paluuarvoon (`2`/`3`); jos `done`-kirjoitus ei kestänyt, job ei ole luotettavasti `done` → reclaim yrittää uudelleen (tiedosto on jo kirjastossa, verify läpäisee, `done` kirjoitetaan uudelleen). |
 
 **NAS-varaus (§14 R1):** jos verkkolevy valehtelee `sync`in kestävyydestä (rc=0 mutta data ei
 levyllä), rc-tarkistus ei auta — viimeinen suoja on `cleanup`in tuore sisältötarkistus ennen lähteen
@@ -604,10 +608,17 @@ kaksi kynnystä heartbeatin (`$STATE/thermal.heartbeat`) iälle:
 - **Päävahdin ja varavahdin omistajuus (tarkistuksen kohta 2):** jos päävahti oli vain hetkellisesti
   myöhässä ja herää samaan aikaan kun varavahti on käynnistetty, molemmat ohjaisivat samaa pgid:tä.
   STOP/CONT ovat idempotentteja (ei bugi), mutta jätetään määrittelemättä. **Sopimus:
-  `locks/thermal.lock` — kumpi tahansa vahti pollaa/ohjaa vain lukon sisällä.** Väistämissääntö:
-  **herännyt päävahti odottaa lukkoa** (ei tapa varavahtia); **varavahti poistuu heti kun havaitsee
-  heartbeatin taas tuoreutuvan** (päävahti elpyi) ja vapauttaa lukon. Korkeintaan yksi vahti ohjaa
-  pgid:tä kerrallaan.
+  `locks/thermal.lock` — vain **pgid-ohjaus (STOP/CONT)** tehdään lukon sisällä.**
+  - **Heartbeat kirjoitetaan LUKON ULKOPUOLELLA** (heti käynnistyttyä ja joka pollauskierroksella).
+    Heartbeat on elossaolosignaali, EI ohjaustoimenpide — sen sitominen lukkoon aiheuttaisi
+    lukkiuman: varavahti pitää lukkoa → herännyt päävahti odottaa lukkoa → ei kirjoittaisi
+    heartbeatia → varavahti ei havaitsisi tuoreutumista → ei poistuisi → lukko ei vapaudu → dispatcher
+    näkee heartbeatin ikuisesti vanhentuneena → **fail-closed jää pysyvästi päälle, enkoodaus pysähtyy
+    hiljaa** (tarkistuksen kohta: v11:n oma regressio). Irrotus lukosta estää tämän.
+  - **Väistämissääntö:** herännyt päävahti kirjoittaa heartbeatin (lukon ulkopuolella) ja jää
+    odottamaan lukkoa; **varavahti havaitsee tuoreutuvan heartbeatin, vapauttaa lukon ja poistuu**;
+    päävahti saa lukon ja jatkaa normaalisti. Korkeintaan yksi vahti ohjaa pgid:tä kerrallaan, ja
+    fail-closed purkautuu heti kun päävahti elpyy.
 
 ### 8.3 Raitapolitiikka (tarkistuksen kohta 13)
 `enqueue` johtaa `want_audio`/`want_subs` configin politiikasta, EI ota sokeasti kaikkia:
@@ -806,8 +817,10 @@ Erikoismerkit (`Astronaut's Wife`, `Fargo (1996)`, ääkköset): kaikki muuttuja
     EI testin 2 kautta joka koskee job-tiedostoja).
 31. **sync-rc (kohta 1):** `sync` epäonnistuu vaiheessa 4 (renamen jälkeen) → `done`ia EI kirjoiteta,
     lähde säilyy, uudelleenajo korvaa saman tiedoston ja onnistuu.
-32. **Vahdin omistajuus (kohta 2):** päävahti myöhässä → varavahti käynnistyy → päävahti herää →
-    vain toinen ohjaa pgid:tä (`thermal.lock`); varavahti poistuu kun heartbeat tuoreutuu.
+32. **Vahdin omistajuus + elpyminen (kohta 2):** päävahti myöhässä → varavahti käynnistyy → päävahti
+    herää → vain toinen ohjaa pgid:tä (`thermal.lock`). **JA elpyminen:** päävahti elpyy varavahdin
+    pitäessä lukkoa → heartbeat tuoreutuu (lukon ulkopuolella) → varavahti vapauttaa lukon ja poistuu
+    → **fail-closed purkautuu, slotteja avataan taas** (ei jää pysyvään varatilaan). Ei lukkiumaa.
 33. Vasta läpäisyn jälkeen pieni oikea päästä-päähän-testi, sitten migraatio.
 
 ---
@@ -823,7 +836,8 @@ Erikoismerkit (`Astronaut's Wife`, `Fargo (1996)`, ääkköset): kaikki muuttuja
 - [ ] **§15 B2: audit.jsonl, rivi ENNEN peruuttamatonta operaatiota.**
 - [ ] **Append-tiedostot (index.jsonl, audit.jsonl): yksi `write()` + PIPE_BUF-mittainen rivi.**
 - [ ] **`sync`in rc tarkistetaan (§2.2 rc 2/3); vaihe-4-fail → EI `done`ia, reclaim→pending (§2.5).**
-- [ ] **Pää-/varavahti: `thermal.lock`, vain yksi ohjaa pgid:tä; herännyt pää odottaa, vara poistuu.**
+- [ ] **Pää-/varavahti: `thermal.lock` vain STOP/CONT-ohjaukselle; heartbeat LUKON ULKOPUOLELLA
+      (muuten lukkiuma + pysyvä fail-closed); vara poistuu kun heartbeat tuoreutuu.**
 - [ ] **§15 B3: state_rev (counters.lockissa), GUI ohittaa skannauksen muuttumattomana.**
 - [ ] **§15 B4: verifiointi itsenäinen funktio + `verify`-komento (3 kutsujaa jo nyt).**
 - [ ] **§15 B5: `may_open_slot()` kokoaa 4 ehtoa; `pause`/`resume` (`$STATE/paused`).**
@@ -963,8 +977,8 @@ ovat valmiina ja testattuina ENNEN migraatiota**, koska migraatio on kertaluonto
 eikä toistettavissa. Ainoa aidosti myöhemmäksi siirtyvä osa on **GUI itse** — erillinen kerros, ei
 ytimen ominaisuus.
 
-Tämä spesifikaatio on itsenäinen eikä edellytä vanhan koodin tuntemusta. **Yhdeksän tarkastuskierrosta
-(13 + 20 + 10 + 14 + 10 + 9 + 6 + 6 + 3 riskiä + GUI-aukot + läpileikkaavat §15) on integroitu sopimuksiksi.**
+Tämä spesifikaatio on itsenäinen eikä edellytä vanhan koodin tuntemusta. **Kymmenen tarkastuskierrosta
+(13+20+10+14+10+9+6+6+3+2 riskiä + GUI-aukot + läpileikkaavat §15) on integroitu sopimuksiksi.**
 En väitä että "kaikki riskit on ratkaistu" — tunnistetut korjattavat kohdat on korjattu, ja loput ovat
 §14:n (R1–R8) tietoisia, dokumentoituja rajauksia. Seitsemännen kierroksen aito korrektiusriski oli
 **`--force` joka olisi voinut kumota `rev`-reconcilen — nyt `rev` on globaalisti monotoninen (§2.6 A1)**;
