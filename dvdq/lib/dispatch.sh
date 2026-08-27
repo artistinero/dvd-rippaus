@@ -71,9 +71,13 @@ encoder_start() {
     setsid false >/dev/null 2>&1 {sfd}>&- & printf '%s' "$!"   # oikea HandBrake vaiheessa 7
   fi
 }
-verify_output() {  # <tmp> <id> → 0 ok. Oikea §8.4-verifiointi vaiheessa 6; stub tässä.
+verify_output() {  # <tmp> <id> → 0 ok. §8.4 rakenteellinen verifiointi (verify.sh).
   if [ -n "${DVDQ_STUB_VERIFY:-}" ]; then "$DVDQ_STUB_VERIFY" "$@"; return $?; fi
-  [ -s "$1" ]
+  command -v verify_structural >/dev/null 2>&1 || { [ -s "$1" ]; return $?; }   # verify.sh ei sourcattu
+  local tmp=$1 id=$2 exp mina
+  exp=$(job_field "$id" .duration_s)
+  mina=$(job_read "$id" | jq -r '(.want_audio // []) | length')
+  verify_structural "$tmp" "${exp:-}" "${mina:-0}"
 }
 
 # --- worker (§4) ------------------------------------------------------------------------------
