@@ -14,22 +14,26 @@ _kind_dir() {
   esac
 }
 # _dest_for <kind> <name> <year> <season> <episode> <role> → "dest_dir\tout_name"
-# role=extra → out_name jätetään tyhjäksi (numerointi ratkaistaan §8.6/vaihe 7 kirjoitushetkellä).
+# Ekstrat menevät teoksen "extras"-alikansioon (Jellyfin ei tulkitse niitä jaksoiksi/elokuviksi);
+# out_name jätetään tyhjäksi ja numeroidaan enqueue-hetkellä per-dest-lukon sisällä (§8.6).
 _dest_for() {
   local kind=$1 name=$2 year=$3 season=$4 episode=$5 role=$6
-  local base="${CFG[DEST_ROOT]}/$(_kind_dir "$kind")" dd on
+  local base="${CFG[DEST_ROOT]}/$(_kind_dir "$kind")" titledir maindir on
   case $kind in
     movie)
       local disp="$name"; [ -n "$year" ] && disp="$name ($year)"
-      dd="$base/$disp"; on="$name.mkv" ;;
+      titledir="$base/$disp"; maindir="$titledir"; on="$name.mkv" ;;
     series)
       local ss ee; ss=$(printf '%02d' "${season:-0}" 2>/dev/null || echo 00)
       ee=$(printf '%02d' "${episode:-0}" 2>/dev/null || echo 00)
-      dd="$base/$name/Season $ss"; on="$name S${ss}E${ee}.mkv" ;;
-    *) dd="$base/$name"; on="$name.mkv" ;;
+      titledir="$base/$name"; maindir="$titledir/Season $ss"; on="$name S${ss}E${ee}.mkv" ;;
+    *) titledir="$base/$name"; maindir="$titledir"; on="$name.mkv" ;;
   esac
-  [ "$role" = extra ] && on=""    # ekstran numero vasta kirjoitushetkellä
-  printf '%s\t%s' "$dd" "$on"
+  if [ "$role" = extra ]; then
+    printf '%s\t%s' "$titledir/extras" ""      # numero kirjoitushetkellä
+  else
+    printf '%s\t%s' "$maindir" "$on"
+  fi
 }
 
 # =============================================================================
@@ -68,6 +72,16 @@ cmd_enqueue() {
   [ -z "$want_subs" ]  && want_subs=$src_subs
   [ -z "$want_audio" ] && want_audio=$src_audio
   local dd on; IFS=$'\t' read -r dd on < <(_dest_for "$kind" "$name" "$year" "$season" "$episode" "$role")
+  # Ekstran numero (§8.6): per-dest-lukon sisällä, max(levyn tiedostot ∪ 3 hakemiston varaukset)+1.
+  # Retry/--force säilyttää olemassa olevan numeron (ei aukkoa/törmäystä).
+  if [ "$role" = extra ]; then
+    if job_exists "$id"; then
+      on=$(job_field "$id" .out_name)
+    else
+      _assign_extra() { on="Extra $(next_extra_number "$dd").mkv"; }
+      with_lock "$(_dest_lock "$dd")" _assign_extra
+    fi
+  fi
   local created; created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   local json
   json=$(jq -cn \

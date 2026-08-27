@@ -110,6 +110,50 @@ index_rebuild() {  # reconcile: rakenna index.jsonl uudelleen jobs/done/:sta
 }
 
 # =============================================================================
+# §15 B2  audit.jsonl (append-only) — RIVI ENNEN peruuttamatonta operaatiota
+# =============================================================================
+_audit_path() { printf '%s/audit.jsonl' "$STATE"; }
+# audit_append <op> <target> <size> <trigger> — yksi write()/PIPE_BUF (§8.6-sopimus). Rivi kirjoitetaan
+# ENNEN operaatiota jotta kesken jäänyt poisto/korvaus näkyy lokista (mitä oltiin tekemässä).
+audit_append() {
+  local line; line=$(jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg op "$1" --arg target "$2" --arg size "${3-}" --arg trigger "${4-}" \
+    '{ts:$ts,op:$op,target:$target,size:($size|select(.!="")|tonumber?),trigger:$trigger}')
+  printf '%s\n' "$line" >> "$(_audit_path)"
+}
+
+# =============================================================================
+# §8.6  Ekstranumerointi — deterministinen (tittelijärjestys), race-vapaa (per-dest-lukko),
+#       retry-stabiili. Numero = max(kohdekansion tiedostot ∪ kaikkien 3 hakemiston varaukset)+1.
+# =============================================================================
+_dest_lock() { printf '%s/dest-%s.lock' "$(lock_dir)" "$(_sha1_12 "$1")"; }
+# next_extra_number <dest_dir> — seuraava vapaa ekstranumero per-dest-lukon SISÄLLÄ (kutsu lukon alta).
+_extra_indices_on_disk() {  # levyllä olevat "Extra NN.mkv" -indeksit
+  local dd=$1 f n
+  for f in "$dd"/Extra\ *.mkv; do
+    [ -e "$f" ] || continue
+    n=$(basename "$f" .mkv | sed -n 's/^Extra \([0-9]\+\)$/\1/p'); [ -n "$n" ] && printf '%s\n' "$n"
+  done
+}
+_extra_indices_reserved() {  # kaikkien 3 hakemiston jobien varaamat ekstra-out_namet samaan dest_diriin
+  local dd=$1 d p on n
+  for d in $(_all_job_dirs); do
+    for p in "$STATE/$d"/*.json; do
+      [ -e "$p" ] || continue
+      [ "$(jq -r '.dest_dir' "$p")" = "$dd" ] || continue
+      on=$(jq -r '.out_name // ""' "$p")
+      n=$(printf '%s' "$on" | sed -n 's/^Extra \([0-9]\+\)\.mkv$/\1/p'); [ -n "$n" ] && printf '%s\n' "$n"
+    done
+  done
+}
+next_extra_number() {
+  local dd=$1 max
+  max=$( { _extra_indices_on_disk "$dd"; _extra_indices_reserved "$dd"; } | sort -n | tail -1 )
+  is_uint "$max" || max=0
+  printf '%s' "$((max+1))"
+}
+
+# =============================================================================
 # §2.6  Job-kirjoitus CAS-flockissa
 # =============================================================================
 # job_put <id> <json>  — luo/korvaa record. rev = max(löydetyt)+1 (A1). Sijoittaa oikeaan hakemistoon

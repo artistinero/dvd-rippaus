@@ -103,6 +103,18 @@ _release_reservation() {  # varaus (encoding, ei workeria) → takaisin pendingi
   job_apply "$1" '.status="pending"|.slot=null|.pid=null|.pgid=null|.starttime=null|.started=null' >/dev/null 2>&1
 }
 
+# _backup_existing_dest <dest> — jos kohde on jo olemassa, siirrä vanha versio BACKUP_DIR:iin
+# (kirjaston ULKOPUOLELLA, §10) aikaleimatulla nimellä. Audit-rivi ENNEN siirtoa (§15 B2). Rc≠0 jos
+# backup epäonnistuu → kutsuja EI ylikirjoita (datahävikin esto). Ei kohdetta → rc 0 (ei tehtävää).
+_backup_existing_dest() {
+  local dest=$1 bdir="${CFG[BACKUP_DIR]}" base ts bak
+  [ -e "$dest" ] || return 0
+  mkdir -p "$bdir" 2>/dev/null || return 1
+  base=$(basename "$dest"); ts=$(date +%Y%m%d-%H%M%S); bak="$bdir/$base.$ts"
+  audit_append library_replace "$dest" "$(stat -c%s "$dest" 2>/dev/null)" "worker-commit"
+  mv -f "$dest" "$bak" && sync_dir "$bdir"
+}
+
 _worker_commit() {  # <id> <tmp> <erc>  — commitoi tulos (§2.5 rc-käsittely, §4 thermal/skip)
   local id=$1 tmp=$2 erc=$3
   local skip tk; skip=$(job_field "$id" .skip_requested); tk=$(job_field "$id" .thermal_kill)
@@ -112,11 +124,12 @@ _worker_commit() {  # <id> <tmp> <erc>  — commitoi tulos (§2.5 rc-käsittely,
       local dest_dir out_name dest
       dest_dir=$(job_field "$id" .dest_dir); out_name=$(job_field "$id" .out_name)
       dest="$dest_dir/$out_name"; mkdir -p "$dest_dir"
-      # §2.1/§2.5: sama fs, sync -d tiedosto, mv, sync hakemisto
-      if sync_file "$tmp" && mv -f "$tmp" "$dest" && sync_dir "$dest_dir"; then
+      # §8.6: varmuuskopioi mahdollinen vanha versio (audit ENNEN) — jos backup epäonnistuu, EI
+      # ylikirjoiteta (datahävikin esto). §2.1/§2.5: sama fs, sync -d tiedosto, mv, sync hakemisto.
+      if _backup_existing_dest "$dest" && sync_file "$tmp" && mv -f "$tmp" "$dest" && sync_dir "$dest_dir"; then
         job_apply "$id" '.status="done"|.finished=(now|todate)|.slot=null|.pid=null|.pgid=null' >/dev/null 2>&1
       else
-        job_apply "$id" '.status="failed"|.fail_reason="mv/sync"|.slot=null|.pid=null|.pgid=null' >/dev/null 2>&1
+        job_apply "$id" '.status="failed"|.fail_reason="mv/sync/backup"|.slot=null|.pid=null|.pgid=null' >/dev/null 2>&1
       fi
     else
       rm -f "$tmp"; job_apply "$id" '.status="failed"|.fail_reason="verify"|.slot=null|.pid=null|.pgid=null' >/dev/null 2>&1
