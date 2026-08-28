@@ -2,7 +2,8 @@
 # dvdq/tools/tila — ihmisluettava enkoodaustila (renderöi `dvdq status` -JSONin). PRESENTAATIOKERROS,
 # ei ydintä (§1: ydin on JSON). Näyttää MITATUN queue-ETAn ja LIVE-fps:n — ei HandBraken arvausta.
 set -uo pipefail
-export LC_ALL=C   # desimaali piste (printf %.2f) — ei riipu koneen localesta
+# C.UTF-8: piste-desimaali (printf %.2f) + UTF-8-merkistö (Unicode-nimien näyttö). Fallback C.
+_u=$(locale -a 2>/dev/null | grep -iE '^C\.utf-?8$' | head -1); export LC_ALL="${_u:-C}"; unset _u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 DVDQ="$HERE/../dvdq"
 

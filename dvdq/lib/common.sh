@@ -5,10 +5,12 @@
 
 set -u
 
-# LC_ALL=C: desimaalierotin AINA piste kaikkialla (awk/printf/sort). Suomen locale (pilkku) rikkoisi
-# numeeriset vertailut (esim. awk parsisi "58.7" → 58) ja jq --argjson (pilkku ei kelpaa JSONiin).
-# Turvallinen: emme tee locale-riippuvaista nimijärjestelyä (jono järjestetään seq-numerolla).
-export LC_ALL=C
+# Locale: C.UTF-8 = C-NUMERIIKKA (desimaali AINA piste → awk/printf/jq oikein; Suomen pilkku rikkoisi
+# esim. num_gt "58.7" "58.2" ja jq --argjson) + UTF-8-MERKISTÖ (Unicode-nimet ä/ö/日 käsitellään
+# merkkeinä, ei rikota). Fallback C jos C.UTF-8 puuttuu (nimet silti läpinäkyviä tavuja → toimivat).
+# Asetetaan skriptissä (ei riipu käynnistysympäristöstä, esim. systemd-daemonin niukka env).
+_dvdq_u=$(locale -a 2>/dev/null | grep -iE '^C\.utf-?8$' | head -1)
+export LC_ALL="${_dvdq_u:-C}"; unset _dvdq_u
 
 # --- polut -------------------------------------------------------------------
 # $STATE = paikallinen tilahakemisto (§3). Oletus johdetaan WORK_DIR:istä (config).

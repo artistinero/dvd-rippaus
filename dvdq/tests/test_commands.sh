@@ -75,6 +75,14 @@ printf '%s\n' "PARALLEL=0" > "$DVDQ_CONFIG"
 run status
 [ "$RC" != 0 ] && [ "$(jqget .error)" = config_invalid ] && ok "PARALLEL=0 → config_invalid" || bad "config_invalid" "$OUT"
 
+echo "== §11 Unicode-nimet säilyvät (ä/ö/日 + erikoismerkit), myös pilkku-localessa =="
+printf '%s\n' "WORK_DIR=$TESTROOT/work" "DEST_ROOT=$TESTROOT/dest" > "$DVDQ_CONFIG"
+UNAME='Amélie — 日本語 & Ääkköset (Motörhead)'
+oletko=$(locale -a 2>/dev/null | grep -iE 'fi_FI.utf8|de_DE.utf8' | head -1)   # ulompi pilkku-locale jos on
+oid=$(LC_ALL="${oletko:-C}" "$DVDQ" enqueue --source "$TESTROOT/src/disc-1/VIDEO_TS" --title 77 --kind movie --name "$UNAME" 2>/dev/null | jq -r .id)
+[ -n "$oid" ] && [ "$(cat "$TESTROOT/work/state/jobs/$oid.json" | jq -r .name)" = "$UNAME" ] && ok "Unicode-nimi säilyi enqueuessa (ulompi: ${oletko:-C})" || bad "unicode" "$(cat "$TESTROOT/work/state/jobs/$oid.json" 2>/dev/null | jq -r .name)"
+[ "$(cat "$TESTROOT/work/state/jobs/$oid.json" | jq -r .dest_dir)" = "$TESTROOT/dest/movies/$UNAME" ] && ok "Unicode dest_dir oikein" || bad "unicode dest" "$(cat "$TESTROOT/work/state/jobs/$oid.json" 2>/dev/null | jq -r .dest_dir)"
+
 echo
 echo "YHTEENVETO: $PASS ok, $FAIL FAIL"
 [ "$FAIL" -eq 0 ]
