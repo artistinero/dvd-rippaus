@@ -205,19 +205,27 @@ _status_json() {
   local cp; cp=$(_counters_path)
   local counters='{"pending":0,"encoding":0,"failed":0,"broken":0,"done":0,"user_skip":0,"abandoned":0,"state_rev":0}'
   [ -f "$cp" ] && counters=$(cat "$cp")
+  # Encoding-lista: nimi/slot + LIVE fps/% HandBraken oikeasta progress-rivistä (eta.sh, jos sourcattu).
   local enc="[]" p
   enc=$(for p in "$STATE/jobs"/*.json; do [ -e "$p" ] || continue;
-        jq -c 'select(.status=="encoding")|{id,name,slot,pid}' "$p" 2>/dev/null; done | jq -cs '.')
+        [ "$(jq -r '.status' "$p")" = encoding ] || continue
+        id=$(jq -r '.id' "$p"); prog='{}'
+        command -v hb_progress_parse >/dev/null 2>&1 && prog=$(hb_progress_parse "$id")
+        jq -c --argjson prog "$prog" '{id,name,slot,pid} + $prog' "$p" 2>/dev/null
+      done | jq -cs '.')
   local paused=false; [ -f "$STATE/paused" ] && paused=true
   local alive; alive=$(dispatcher_alive)
   local updated; updated=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  # Kalliit + mitatut kentät vain ihmisen status-kutsulla (ei dispatcherin tiheässä --fast-kirjoituksessa).
   local meters='{}'
   if [ "$fast" != 1 ] && command -v quarantine_bytes >/dev/null 2>&1; then
+    local eta_s speed; eta_s=$(queue_eta_s 2>/dev/null); speed=$(encode_speed_factor 2>/dev/null)
     meters=$(jq -cn \
       --argjson ed "$(( $(encode_debt_bytes) / 1073741824 ))" \
       --argjson qg "$(( $(quarantine_bytes) / 1073741824 ))" \
       --argjson ag "$(( $(abandoned_bytes)  / 1073741824 ))" \
-      '{encode_debt_gb:$ed,quarantine_gb:$qg,abandoned_gb:$ag}')
+      --argjson eta "${eta_s:-null}" --argjson sp "${speed:-null}" \
+      '{encode_debt_gb:$ed,quarantine_gb:$qg,abandoned_gb:$ag,queue_eta_s:$eta,speed_factor:$sp}')
   fi
   jq -cn --argjson c "$counters" --argjson enc "$enc" --argjson paused "$paused" \
         --argjson alive "$alive" --arg updated "$updated" --argjson parallel "${CFG[PARALLEL]}" \

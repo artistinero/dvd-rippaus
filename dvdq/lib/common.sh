@@ -5,6 +5,11 @@
 
 set -u
 
+# LC_ALL=C: desimaalierotin AINA piste kaikkialla (awk/printf/sort). Suomen locale (pilkku) rikkoisi
+# numeeriset vertailut (esim. awk parsisi "58.7" → 58) ja jq --argjson (pilkku ei kelpaa JSONiin).
+# Turvallinen: emme tee locale-riippuvaista nimijärjestelyä (jono järjestetään seq-numerolla).
+export LC_ALL=C
+
 # --- polut -------------------------------------------------------------------
 # $STATE = paikallinen tilahakemisto (§3). Oletus johdetaan WORK_DIR:istä (config).
 : "${DVDQ_CONFIG:=$HOME/.config/rip-dvd/config}"

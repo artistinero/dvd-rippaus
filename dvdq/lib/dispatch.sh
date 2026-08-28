@@ -75,6 +75,8 @@ encoder_start() {
   # ei salli setsid-prosesseja); tuotannossa setsid aina päällä. Komento kootaan taulukkoon ja
   # käynnistetään KERRAN taustalle → $! = enkooderi (=pgid), workerin suora lapsi (wait toimii).
   local -a pre=(setsid); [ -n "${DVDQ_NO_SETSID:-}" ] && pre=()
+  # HandBraken stderr → per-job-loki, jotta live-fps/% saadaan oikeasta progress-rivistä (eta.sh).
+  local hblog=/dev/null; command -v _hb_log >/dev/null 2>&1 && hblog=$(_hb_log "$id")
   local -a cmd
   if [ -n "${DVDQ_STUB_ENCODER:-}" ]; then
     cmd=("${pre[@]}" "$DVDQ_STUB_ENCODER" "$id" "$src" "$title" "$tmp")
@@ -82,7 +84,7 @@ encoder_start() {
     local -a hb; _hb_build hb "$id" "$src" "$title" "$tmp"
     cmd=("${pre[@]}" HandBrakeCLI "${hb[@]}")
   fi
-  "${cmd[@]}" >/dev/null 2>&1 {sfd}>&- &
+  "${cmd[@]}" >/dev/null 2>"$hblog" {sfd}>&- &
   ENCODER_PID=$!
 }
 
@@ -155,6 +157,7 @@ _backup_existing_dest() {
 
 _worker_commit() {  # <id> <tmp> <erc>  — commitoi tulos (§2.5 rc-käsittely, §4 thermal/skip)
   local id=$1 tmp=$2 erc=$3
+  command -v _hb_log >/dev/null 2>&1 && rm -f "$(_hb_log "$id")" 2>/dev/null   # enkooderi valmis → poista live-loki
   local skip tk; skip=$(job_field "$id" .skip_requested); tk=$(job_field "$id" .thermal_kill)
   if [ "$erc" = 0 ]; then
     if [ "$skip" = true ]; then rm -f "$tmp"; job_apply "$id" '.status="user_skip"|.finished=(now|todate)|.slot=null|.pid=null|.pgid=null' >/dev/null 2>&1; return; fi

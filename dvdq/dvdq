@@ -12,7 +12,7 @@ DVDQ_HOME=$(cd "$(dirname "$_self")" && pwd)
 # Bootstrap-virhekuori: source-virhe tapahtuu ENNEN common.sh:ta (ei err_out'ia) → tulosta käsin.
 # Näin §6.1:n kuori säilyy myös keskeytyneen atomisen deployn tilassa (README kohta 3).
 _bootstrap_fail() { printf '{"ok":false,"error":"install_broken","detail":{"file":"%s"}}\n' "$1"; exit 1; }
-for _m in common jobs commands verify cleanup scan rip migrate thermal dispatch; do
+for _m in common jobs commands verify cleanup eta scan rip migrate thermal dispatch; do
   # shellcheck disable=SC1090
   source "$DVDQ_HOME/lib/$_m.sh" || _bootstrap_fail "$DVDQ_HOME/lib/$_m.sh"
 done

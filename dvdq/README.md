@@ -36,6 +36,9 @@ tests/               kattava testisarja (kukin osio ajettavissa erikseen)
 - `dvdq migrate --manifest FILE [--dry-run]` — vanhan jonon tuonti
 - `dvdq pause | resume` — pysäytä/jatka uusien slottien avaus
 - `dvdq reconcile` — käynnistyksen tila-eheytys
+- `tools/tila` — ihmisluettava näkymä: **MITATTU** jono-ETA (toteutuneesta tahdista × oikeista
+  kestoista ÷ PARALLEL, ei HandBraken arvausta) + LIVE-fps/% enkoodattavista. Ennen ensimmäisiä
+  valmistumisia ETA = "ei vielä mittausta" (rehellinen, ei valehtele lukua).
 
 ## Testien ajo
 

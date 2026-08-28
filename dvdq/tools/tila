@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# dvdq/tools/tila — ihmisluettava enkoodaustila (renderöi `dvdq status` -JSONin). PRESENTAATIOKERROS,
+# ei ydintä (§1: ydin on JSON). Näyttää MITATUN queue-ETAn ja LIVE-fps:n — ei HandBraken arvausta.
+set -uo pipefail
+export LC_ALL=C   # desimaali piste (printf %.2f) — ei riipu koneen localesta
+HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+DVDQ="$HERE/../dvdq"
+
+j=$("$DVDQ" status 2>/dev/null) || { echo "status epäonnistui"; exit 1; }
+[ "$(printf '%s' "$j" | jq -r '.ok // false')" = true ] || { printf '%s\n' "$j"; exit 1; }
+
+fmt_hms(){ local s=${1:-}; [ -n "$s" ] && [ "$s" != null ] || { printf '—'; return; }
+  printf '%dh %dmin' $((s/3600)) $(((s%3600)/60)); }
+
+printf '══════════ dvdq tila %s ══════════\n' "$(date '+%d.%m. %H:%M:%S')"
+printf 'Rinnakkaisuus: PARALLEL=%s   Dispatcher: %s%s\n' \
+  "$(printf '%s' "$j"|jq -r '.parallel')" \
+  "$([ "$(printf '%s' "$j"|jq -r '.dispatcher_alive')" = true ] && echo käynnissä || echo ALHAALLA)" \
+  "$([ "$(printf '%s' "$j"|jq -r '.paused')" = true ] && echo '   [PAUSED]' || echo '')"
+
+echo "Enkoodataan:"
+n=$(printf '%s' "$j"|jq -r '.encoding|length')
+if [ "$n" = 0 ]; then echo "  (ei mitään käynnissä)"; else
+  printf '%s' "$j" | jq -r '.encoding[] |
+    "  ● \(.name // .id)   \(if .pct then "\(.pct)% " else "" end)\(if .fps then ", \(.fps) fps" else "" end)\(if .eta_s then ", ETA \((.eta_s/60|floor))min" else "" end)"'
+fi
+
+# jono + mittarit
+read -r pending done_ failed broken uskip aband < <(printf '%s' "$j"|jq -r '[.pending,.done,.failed,.broken,.user_skip,.abandoned]|@tsv')
+printf 'Jono: %s odottaa | %s valmis | %s failed | %s broken | %s user_skip | %s abandoned\n' \
+  "$pending" "$done_" "$failed" "$broken" "$uskip" "$aband"
+
+sp=$(printf '%s' "$j"|jq -r '.speed_factor // empty')
+eta=$(printf '%s' "$j"|jq -r '.queue_eta_s // empty')
+if [ -n "$sp" ]; then
+  printf 'Mitattu tahti: %.2f× reaaliaika   →  jono valmis ~%s (MITATTU)\n' "$sp" "$(fmt_hms "$eta")"
+else
+  echo "Mitattu tahti: (ei vielä valmistuneita mittaukseen — ETA tulee kun ensimmäiset valmistuvat)"
+fi
+printf 'Velka: %s GB enkoodattavaa | karanteeni %s GB | kuitattu %s GB\n' \
+  "$(printf '%s' "$j"|jq -r '.encode_debt_gb // 0')" \
+  "$(printf '%s' "$j"|jq -r '.quarantine_gb // 0')" \
+  "$(printf '%s' "$j"|jq -r '.abandoned_gb // 0')"
+echo "══════════════════════════════════════════"
