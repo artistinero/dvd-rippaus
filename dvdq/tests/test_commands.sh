@@ -83,6 +83,22 @@ oid=$(LC_ALL="${oletko:-C}" "$DVDQ" enqueue --source "$TESTROOT/src/disc-1/VIDEO
 [ -n "$oid" ] && [ "$(cat "$TESTROOT/work/state/jobs/$oid.json" | jq -r .name)" = "$UNAME" ] && ok "Unicode-nimi säilyi enqueuessa (ulompi: ${oletko:-C})" || bad "unicode" "$(cat "$TESTROOT/work/state/jobs/$oid.json" 2>/dev/null | jq -r .name)"
 [ "$(cat "$TESTROOT/work/state/jobs/$oid.json" | jq -r .dest_dir)" = "$TESTROOT/dest/movies/$UNAME" ] && ok "Unicode dest_dir oikein" || bad "unicode dest" "$(cat "$TESTROOT/work/state/jobs/$oid.json" 2>/dev/null | jq -r .dest_dir)"
 
+echo "== §11 tiedostonimien sanitointi (SMB-kielletyt merkit) =="
+( source "$HERE/../lib/common.sh"; source "$HERE/../lib/commands.sh"
+  [ "$(sanitize_name 'Blade Runner: The Final Cut')" = 'Blade Runner - The Final Cut' ] && echo OK1 || echo "FAIL1 [$(sanitize_name 'Blade Runner: The Final Cut')]"
+  [ "$(sanitize_name 'a/b\c?d*e"f<g>h|i')" = "a-b-cde'f(g)h-i" ] && echo OK2 || echo "FAIL2 [$(sanitize_name 'a/b\c?d*e"f<g>h|i')]"
+  [ "$(sanitize_name 'Ääkköset 日本 : x')" = 'Ääkköset 日本 - x' ] && echo OK3 || echo "FAIL3 [$(sanitize_name 'Ääkköset 日本 : x')]"
+  [ "$(sanitize_name '  ...trimmi.  ')" = 'trimmi' ] && echo OK4 || echo "FAIL4 [$(sanitize_name '  ...trimmi.  ')]" ) > "$TESTROOT/san.out" 2>&1
+grep -q OK1 "$TESTROOT/san.out" && ok "kaksoispiste → ' -'" || bad "san :" "$(grep FAIL1 "$TESTROOT/san.out")"
+grep -q OK2 "$TESTROOT/san.out" && ok "/\\?*\"<>| sanitoitu" || bad "san merkit" "$(grep FAIL2 "$TESTROOT/san.out")"
+grep -q OK3 "$TESTROOT/san.out" && ok "Unicode säilyy sanitoinnissa" || bad "san unicode" "$(grep FAIL3 "$TESTROOT/san.out")"
+grep -q OK4 "$TESTROOT/san.out" && ok "loppupisteet/-välit trimmataan" || bad "san trim" "$(grep FAIL4 "$TESTROOT/san.out")"
+# enqueue: dest_dir sanitoitu mutta .name raaka
+SNAME='X: Y/Z?'
+sid=$("$DVDQ" enqueue --source "$TESTROOT/src/disc-1/VIDEO_TS" --title 78 --kind movie --name "$SNAME" 2>/dev/null | jq -r .id)
+[ "$(cat "$TESTROOT/work/state/jobs/$sid.json"|jq -r .name)" = "$SNAME" ] && ok ".name säilyy raakana (näyttö)" || bad "raw name" "$(cat "$TESTROOT/work/state/jobs/$sid.json"|jq -r .name)"
+[ "$(cat "$TESTROOT/work/state/jobs/$sid.json"|jq -r .dest_dir)" = "$TESTROOT/dest/movies/X - Y-Z" ] && ok "dest_dir sanitoitu" || bad "san dest" "$(cat "$TESTROOT/work/state/jobs/$sid.json"|jq -r .dest_dir)"
+
 echo
 echo "YHTEENVETO: $PASS ok, $FAIL FAIL"
 [ "$FAIL" -eq 0 ]

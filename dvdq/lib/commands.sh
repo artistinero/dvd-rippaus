@@ -13,11 +13,32 @@ _kind_dir() {
     *) printf '%s' "${CFG[DIR_MISC]}" ;;
   esac
 }
+# sanitize_name <str> — tee merkkijonosta turvallinen TIEDOSTONIMEN OSA (§11). Korvaa millä tahansa
+# tiedostojärjestelmällä/SMB:llä kielletyt merkit; säilyttää Unicoden (ä/ö/日 — kielletyt ovat kaikki
+# ASCII, eivät osu UTF-8-monitavuisiin). Jobin .name säilyy RAAKANA (näyttö); vain polut sanitoidaan.
+sanitize_name() {
+  local s=$1
+  s=${s//:/ -}      # kaksoispiste → " -"  (esim. "Blade Runner: The Final Cut" → "Blade Runner - The Final Cut")
+  s=${s//\//-}      # /  → -   (ei voi olla tiedostonimessä millään fs:llä)
+  s=${s//\\/-}      # \  → -
+  s=${s//\"/\'}     # "  → '
+  s=${s//</(}       # <  → (
+  s=${s//>/)}       # >  → )
+  s=${s//|/-}       # |  → -
+  s=${s//\?/}       # ?  → (pois)   (glob-merkki → escapattu)
+  s=${s//\*/}       # *  → (pois)
+  # kontrollimerkit pois; tiivistä välit; trimmaa alku/loppu välit ja pisteet (SMB/Windows kieltää loppupisteet)
+  s=$(printf '%s' "$s" | tr -d '\000-\037' | sed -E 's/  +/ /g; s/^[ .]+//; s/[ .]+$//')
+  [ -n "$s" ] || s=untitled
+  printf '%s' "$s"
+}
+
 # _dest_for <kind> <name> <year> <season> <episode> <role> → "dest_dir\tout_name"
 # Ekstrat menevät teoksen "extras"-alikansioon (Jellyfin ei tulkitse niitä jaksoiksi/elokuviksi);
 # out_name jätetään tyhjäksi ja numeroidaan enqueue-hetkellä per-dest-lukon sisällä (§8.6).
 _dest_for() {
   local kind=$1 name=$2 year=$3 season=$4 episode=$5 role=$6
+  name=$(sanitize_name "$name")   # polut turvallisiksi; jobin .name-kenttä säilyy raakana (cmd_enqueue)
   local base="${CFG[DEST_ROOT]}/$(_kind_dir "$kind")" titledir maindir on
   case $kind in
     movie)
