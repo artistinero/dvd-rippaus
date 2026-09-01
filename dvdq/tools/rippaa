@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# dvdq/tools/rippaa — interaktiivinen rippaus→vahvistus→enqueue-kääre. PRESENTAATIOKERROS (saa kysyä;
+# ydin pysyy ei-interaktiivisena). Rippaa levyn, näyttää tittelit kestoineen + pääelokuva-ehdotuksen,
+# kysyy nimen/tyypin, ja enqueuaa jokaisen valitun tittelin TÄYSINE METADATOINEEN (→ mitattu ETA toimii).
+# Testihook: DVDQ_RIPPAA_SCANFILE=<valmis scans-json> ohittaa rippauksen (logiikan testaus ilman levyä).
+set -uo pipefail
+_u=$(locale -a 2>/dev/null | grep -iE '^C\.utf-?8$' | head -1); export LC_ALL="${_u:-C}"; unset _u
+HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+DVDQ="$HERE/../dvdq"
+source "$HERE/../lib/common.sh"; source "$HERE/../lib/jobs.sh"; source "$HERE/../lib/scan.sh"
+config_load
+
+DEV="${1:-/dev/sr1}"
+
+# --- 1. rippaus + skannaus (tai testihook) ----------------------------------------------------
+if [ -n "${DVDQ_RIPPAA_SCANFILE:-}" ]; then
+  scanfile="$DVDQ_RIPPAA_SCANFILE"
+else
+  printf 'Ripataan ja skannataan %s ... (tämä voi kestää)\n' "$DEV" >&2
+  out=$("$DVDQ" rip "$DEV" 2>/dev/null | grep '"ok"' | tail -1)
+  if [ "$(printf '%s' "$out" | jq -r '.ok // false')" != true ]; then
+    printf 'Rippaus/skannaus epäonnistui: %s\n' "$out" >&2; exit 1
+  fi
+  scanfile=$(_scan_path "$(printf '%s' "$out" | jq -r '.disc_key')")
+fi
+[ -f "$scanfile" ] || { echo "Scan-tiedostoa ei löydy: $scanfile" >&2; exit 1; }
+
+src=$(jq -r '.source' "$scanfile")
+mainsug=$(jq -r '.main_suggestion // empty' "$scanfile")
+conf=$(jq -r '.confidence // "?"' "$scanfile")
+
+# --- 2. näytä tittelit (ok, pisin ensin) ------------------------------------------------------
+echo "════════ Levyn tittelit ════════"
+jq -r --argjson ms "${mainsug:-null}" '
+  .titles | map(select(.status=="ok")) | sort_by(-(.duration_s // 0)) | .[] |
+  "  Titteli \(.title): \((.duration_s // 0)/60 | floor) min\(if .title==$ms then "   ⟵ PÄÄELOKUVA-EHDOTUS" else "" end)  [\(.width)x\(.height) \(.format // "?")]"' "$scanfile"
+brokn=$(jq -r '[.titles[]|select(.status=="broken")]|length' "$scanfile")
+[ "$brokn" -gt 0 ] && echo "  (+ $brokn vaurioitunutta titteliä ohitettu)"
+echo "  Pääelokuva-ehdotus: titteli ${mainsug:-?} (luottamus: $conf)"
+echo "════════════════════════════════"
+
+# --- 3. kysy luokittelu -----------------------------------------------------------------------
+read -rp "Tyyppi [movie/series/doc/music/misc] (oletus movie): " kind; kind=${kind:-movie}
+name=""; while [ -z "$name" ]; do read -rp "Nimi (pakollinen): " name; done
+year=""; season=""; ep0=1
+case $kind in
+  movie|doc) read -rp "Vuosi (valinnainen): " year ;;
+  series)    read -rp "Kausi (numero): " season; read -rp "Ensimmäisen jakson numero [1]: " ep0; ep0=${ep0:-1} ;;
+esac
+
+if [ "$kind" = series ]; then
+  read -rp "Jakso-tittelit järjestyksessä (välilyönnein, tyhjä = kaikki ok >= ${CFG[MIN_DURATION]}s): " eps
+  [ -z "$eps" ] && eps=$(jq -r --argjson md "${CFG[MIN_DURATION]}" '.titles|map(select(.status=="ok" and (.duration_s//0)>=$md))|sort_by(.title)|.[].title' "$scanfile" | tr '\n' ' ')
+  read -rp "Ekstra-tittelit (välilyönnein, tyhjä = ei ekstroja): " extras
+else
+  read -rp "Pääelokuvan titteli [${mainsug:-}]: " maint; maint=${maint:-$mainsug}
+  read -rp "Ekstra-tittelit (välilyönnein, 'auto' = kaikki muut ok >= ${CFG[MIN_DURATION]}s, tyhjä = ei ekstroja): " extras
+  if [ "$extras" = auto ]; then
+    extras=$(jq -r --argjson md "${CFG[MIN_DURATION]}" --argjson m "${maint:-null}" \
+      '.titles|map(select(.status=="ok" and (.duration_s//0)>=$md and .title!=$m))|sort_by(.title)|.[].title' "$scanfile" | tr '\n' ' ')
+  fi
+fi
+
+# --- 4. yhteenveto + vahvistus ----------------------------------------------------------------
+echo "──────── Yhteenveto ────────"
+echo "  Tyyppi: $kind   Nimi: $name   ${year:+Vuosi: $year}${season:+Kausi: $season (jaksot alkaen $ep0)}"
+[ "$kind" = series ] && echo "  Jaksot (tittelit): $eps" || echo "  Pääelokuva: titteli $maint"
+echo "  Ekstrat (tittelit): ${extras:-—}"
+echo "────────────────────────────"
+read -rp "Enqueuaanko nämä? [K/e]: " ok; case ${ok:-K} in [eEnN]*) echo "Peruttu."; exit 0;; esac
+
+# --- 5. enqueue metadatoineen -----------------------------------------------------------------
+# _enq <title> <role> [episode] — poimii tittelin metadatan scanista ja kutsuu dvdq enqueue.
+_enq() {
+  local t=$1 role=$2 epi=${3:-}
+  local ti; ti=$(jq -c --argjson t "$t" '.titles[]|select(.title==$t)' "$scanfile")
+  [ -n "$ti" ] || { echo "  (titteli $t: ei scanissa, ohitetaan)"; return; }
+  local -a a=(--source "$src" --title "$t" --kind "$kind" --name "$name" --role "$role")
+  [ -n "$year" ]   && a+=(--year "$year")
+  [ -n "$season" ] && a+=(--season "$season")
+  [ -n "$epi" ]    && a+=(--episode "$epi")
+  # metadata scanista (kestot ym. → mitattu ETA)
+  local d w h dar fps fmt il crop subs aud
+  d=$(jq -r '.duration_s // empty' <<<"$ti"); w=$(jq -r '.width // empty' <<<"$ti"); h=$(jq -r '.height // empty' <<<"$ti")
+  dar=$(jq -r '.dar // empty' <<<"$ti"); fps=$(jq -r '.fps // empty' <<<"$ti"); fmt=$(jq -r '.format // empty' <<<"$ti")
+  il=$(jq -r '.interlaced // false' <<<"$ti"); crop=$(jq -r '.crop // empty' <<<"$ti")
+  subs=$(jq -c '.src_subs // []' <<<"$ti"); aud=$(jq -c '.src_audio // []' <<<"$ti")
+  [ -n "$d" ]   && a+=(--duration "$d");   [ -n "$w" ] && a+=(--width "$w"); [ -n "$h" ] && a+=(--height "$h")
+  [ -n "$dar" ] && a+=(--dar "$dar");      [ -n "$fps" ] && a+=(--fps "$fps"); [ -n "$fmt" ] && a+=(--format "$fmt")
+  a+=(--interlaced "$il");                 [ -n "$crop" ] && a+=(--crop "$crop")
+  a+=(--src-subs "$subs" --src-audio "$aud")
+  local r; r=$("$DVDQ" enqueue "${a[@]}" 2>&1)
+  if [ "$(printf '%s' "$r"|jq -r '.ok // false' 2>/dev/null)" = true ]; then
+    echo "  ✓ titteli $t → $role $([ -n "$epi" ] && echo "(jakso $epi)")"
+  else echo "  ✗ titteli $t: $(printf '%s' "$r"|jq -r '.error // .' 2>/dev/null)"; fi
+}
+
+n=0
+if [ "$kind" = series ]; then
+  epi=$ep0; for t in $eps; do _enq "$t" main "$epi"; epi=$((epi+1)); n=$((n+1)); done
+else
+  [ -n "${maint:-}" ] && { _enq "$maint" main; n=$((n+1)); }
+fi
+for t in $extras; do _enq "$t" extra; n=$((n+1)); done
+
+echo "Valmis: $n titteliä lisätty jonoon. Tila: dvdq-tila"

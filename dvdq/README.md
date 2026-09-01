@@ -76,7 +76,8 @@ Kaikki palauttavat JSON-kuoren stdoutiin: `{"ok":true,...}` tai `{"ok":false,"er
 
 | Komento | Kuvaus |
 |---------|--------|
-| `dvdq rip <laite>` | rippaa levy (dvdbackup) + skannaa → `scans/<sha1>.json`. UI vahvistaa + enqueuaa. |
+| `tools/rippaa [laite]` | **INTERAKTIIVINEN** rippaus→enqueue (oletuslaite /dev/sr1): rippaa, näyttää tittelit + pääelokuva-ehdotuksen, kysyy nimen/tyypin, enqueuaa metadatoineen. Tämä on tavallinen käyttötapa. |
+| `dvdq rip <laite>` | (matalan tason) rippaa levy (dvdbackup) + skannaa → `scans/<sha1>.json`. `tools/rippaa` käyttää tätä. |
 | `dvdq scan <dvd_dir>` | skannaa tittelit (lsdvd→HandBrake), JSONL-edistyminen, pääelokuva-heuristiikka. |
 | `dvdq enqueue --source S --title N --kind K --name NIMI [--year Y --season SS --episode EE] [--role main\|extra] [--force] [metadata-liput]` | lisää työ jonoon (idempotentti). |
 | `dvdq dispatch [--once]` | enkoodausdaemon (systemd). `--once` = yksi täyttökierros. |
