@@ -57,10 +57,15 @@ selain (läppäri/puhelin)  ──HTTP/JSON──►  dvdq-web (backend, brainbi
    `~/.config/rip-dvd/config`.
 5. **Daemon**: tila + start/stop (sama `dvdq daemon`).
 
-## Monikielisyys (i18n) — tehdään ennen isoa GUI-tekstimäärää
-- Yhteinen avain→teksti-malli. Oletus **suomi**, lisäksi **englanti + espanja**, myöhemmin muita.
-- CLI: `lib/i18n.sh` (avain → käännös, kieli configista/env:stä). GUI: samat katalogit JSONina.
-- Tehtävä varhain: retrofit myöhemmin on tuskaa. Tämä on GUI-työn ensimmäinen palanen.
+## Monikielisyys (i18n) — kieli valittavissa SEKÄ GUI:ssa ETTÄ komentoriviltä
+- Yhteinen avain→teksti-malli, **jaetut katalogit** fi/en/es (myöhemmin muita). Oletus **suomi**.
+- **Kielen valinta molemmissa käyttötavoissa (käyttäjän vaatimus):**
+  - **CLI:** kieli asetuksesta `~/.config/rip-dvd/config` (`LANG=es` / oma `DVDQ_LANG`), ohitettavissa
+    ympäristömuuttujalla tai `--lang <koodi>` -lipulla per ajo. `lib/i18n.sh` lataa oikean katalogin.
+  - **GUI:** kielivalitsin käyttöliittymässä (esim. ylävalikossa), valinta talletetaan samaan
+    configiin → pysyy myös seuraaville ajoille ja näkyy myös CLI:lle. Sama valinta, yksi lähde.
+- Katalogit ovat samat tiedostot molemmille (CLI lukee, GUI tarjoilee) → ei käännöksiä kahteen paikkaan.
+- Tehtävä varhain (ennen isoa tekstimäärää): retrofit myöhemmin on tuskaa. GUI-työn ensimmäinen palanen.
 
 ## Toteutuksen vaiheistus (ehdotus)
 1. **`dvdq serve` -backend** + read-only jono-dashboard (live status). Pienin hyöty-ensimmäinen:
@@ -74,6 +79,29 @@ selain (läppäri/puhelin)  ──HTTP/JSON──►  dvdq-web (backend, brainbi
   ei uusia riippuvuuksia, helppo jakaa.
 - Autentikointi: lähiverkko riittänee aluksi; jos altistetaan laajemmin, yksinkertainen token.
 - Live-päivitys: pollaus (yksinkertainen, riittää) vs SSE (sulavampi). Aloita pollauksella.
+
+## Moniformaattisuus alusta asti (DVD / Blu-ray / 4K UHD / ääni-CD)
+
+GUI:ta EI suunnitella DVD-only:na, vaan **media-tyypin abstraktion** varaan, jotta sama jono ja sama
+käyttöliittymä ottaa mitä tahansa lähdettä. Ydin saa `media`-kentän (`dvd` | `bluray` | `uhd` | `cd`),
+ja per-tyyppi valitaan **rip- + scan- + encode-strategia**:
+
+| media | rip-backend | scan | encode/kohde |
+|-------|-------------|------|--------------|
+| dvd   | dvdbackup + libdvdcss (nyt) | lsdvd + HandBrake --scan | HandBrake x265 → mkv |
+| bluray| makemkvcon / libaacs+libbdplus | makemkv info | HandBrake x265 → mkv |
+| uhd   | makemkvcon (friendly-asema, AACS2) | makemkv info | HEVC/HDR-passthrough → mkv |
+| cd    | cdparanoia / whipper | MusicBrainz-haku | FLAC + tagit → music/ |
+
+**GUI-seuraukset:** rippaus-velho kysyy (tai tunnistaa) median tyypin ja näyttää sille sopivat kentät
+(esim. ääni-CD: levy → MusicBrainz-ehdotus artisti/albumi → raidat FLACeiksi; ei "pääelokuva/ekstrat").
+Jono-näkymä on yhteinen — DVD-elokuva, Blu-ray ja ääni-CD voivat olla samassa jonossa rinnakkain.
+Ydin pysyy format-agnostisena; vain backendit ovat tyyppikohtaisia. **Tämä on syytä huomioida jo nyt
+tietomallissa (media-kenttä jobiin) vaikka backendit toteutetaan myöhemmin**, ettei jälkiasennus riko.
+
+Toteutettavuus lyhyesti: ääni-CD ja Blu-ray ovat hyvin mahdollisia (koodi + BD-asema/avaimet);
+4K UHD on laiteriippuvainen (tietty "friendly" UHD-asema + AACS 2.0). Jono/daemon/job-malli tukevat
+kaikkia jo nyt — työ on per-formaatti-backendeissä ja raudassa, ei arkkitehtuurissa.
 
 ## Mitä EI muuteta
 Ydin (`dvdq/lib/*`, komennot, jono, daemon) pysyy sellaisenaan — GUI on additiivinen. Jos jokin
