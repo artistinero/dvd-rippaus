@@ -102,7 +102,13 @@ _hb_build() {
   wa=$(printf '%s' "$j" | jq -r '(.want_audio // []) | join(",")')
   ws=$(printf '%s' "$j" | jq -r '(.want_subs  // []) | join(",")')
   _out=( -i "$src" --title "$title" -o "$tmp" -f av_mkv -e "$enc" -q "$crf" )
-  [ -n "$wa" ] && _out+=( --audio-lang-list "$wa" --all-audio ) || _out+=( -a 1 )
+  # SUOJAVERKKO: ääntä EI saa pudottaa hiljaa eikä enkoodata turhaan uusiksi (vanhan rip-dvd.sh:n
+  # tunnettu-hyvä: --all-audio --aencoder copy --audio-fallback aac). Vanha dvdq:n `-a 1`-vara otti
+  # VAIN 1. raidan kun want_audio tyhjä (skannaus petti) → ääniraitoja katosi; ilman --aencoder copy
+  # ääni myös enkoodattiin uusiksi (Looper-ulostulo mp3). Nyt: aina KAIKKI raidat + kopio, kielilista
+  # rajaa vain jos annettu. Ääntä säilytetään aina, ei koskaan pudoteta hiljaa. (Puute #1, 2026-09-01.)
+  [ -n "$wa" ] && _out+=( --audio-lang-list "$wa" )
+  _out+=( --all-audio --aencoder copy --audio-fallback aac )
   # SUOJAVERKKO: tekstityksiä EI saa koskaan pudottaa hiljaa. Jos want_subs on tyhjä (esim. skannaus
   # ei tuottanut kieliä), otetaan silti KAIKKI lähteen tekstitykset mukaan (--all-subtitles yksin =
   # kaikki kielet). Kielilista rajaa vain jos se on annettu. Ylimääräinen tekstitys on harmiton,
