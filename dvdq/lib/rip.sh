@@ -32,6 +32,18 @@ rip_backup() {
   is_uint "$RIP_READ_ERRORS" || RIP_READ_ERRORS=0
 }
 
+# _ensure_disc <device> — sulje kelkka (jos auki) ja odota kunnes media on luettavissa. Vanha
+# korjaa-tekstitys.sh teki `eject -t` alussa; sama tarve tässä. rc≠0 jos ei levyä timeoutin sisällä.
+_ensure_disc() {
+  local dev=$1 i
+  command -v eject >/dev/null 2>&1 && eject -t "$dev" >/dev/null 2>&1   # sulje kelkka (no-op jos jo kiinni)
+  for i in $(seq 1 30); do                                             # odota ≤60 s että levy pyörähtää käyntiin
+    dd if="$dev" of=/dev/null bs=2048 count=1 >/dev/null 2>&1 && return 0
+    sleep 2
+  done
+  return 1
+}
+
 # cmd_rip <device> — levytila-/velkaesiehto (§7.1), rippaus, VIDEO_TS-paikannus, scan.
 cmd_rip() {
   local dev=${1-}; [ -n "$dev" ] || { err_out bad_state args "" "laite pakollinen"; return 1; }
@@ -44,6 +56,10 @@ cmd_rip() {
   if command -v encode_debt_bytes >/dev/null 2>&1; then
     local debtb maxb; debtb=$(encode_debt_bytes); maxb=$(gb_to_bytes "${CFG[RIP_AHEAD_MAX_GB]}")
     num_ge "$debtb" "$maxb" && { err_out bad_state debt "$debtb" "enkoodausvelka > RIP_AHEAD_MAX_GB"; return 1; }
+  fi
+  # --- kelkan sulku + levyn valmius (paitsi stub-testissä) ---
+  if [ -z "${DVDQ_STUB_DVDBACKUP:-}" ]; then
+    _ensure_disc "$dev" || { err_out disc_broken device "$dev" "ei luettavaa levyä 60 s:ssa (kelkka auki tai tyhjä?)"; return 1; }
   fi
   # --- rippaus ---
   local discdir; discdir=$(next_disc_dir)
