@@ -121,12 +121,15 @@ _hb_build() {
 verify_output() {  # <tmp> <id> → 0 ok. §8.4 rakenteellinen verifiointi (verify.sh).
   if [ -n "${DVDQ_STUB_VERIFY:-}" ]; then "$DVDQ_STUB_VERIFY" "$@"; return $?; fi
   command -v verify_structural >/dev/null 2>&1 || { [ -s "$1" ]; return $?; }   # verify.sh ei sourcattu
-  local tmp=$1 id=$2 exp mina
+  local tmp=$1 id=$2 exp mina mins j
+  j=$(job_read "$id")
   exp=$(job_field "$id" .duration_s)
-  # R8: verifioinnin alaraja = 1 jos ääntä odotetaan (ei want_audio-pituus, ettei kommenttiheuristiikan
-  # väärinarvio hylkää jobia). §8.4a.
-  mina=$(job_read "$id" | jq -r 'if ((.want_audio // [])|length)>0 then 1 else 0 end')
-  verify_structural "$tmp" "${exp:-}" "${mina:-0}"
+  # R8: verifioinnin alaraja = 1 (ei tarkka määrä, ettei kommenttiheuristiikka väärin hylkää). §8.4a.
+  # Perusta src_*:iin (mitä levyllä oikeasti oli) TAI want_*:iin → tekstityksen/äänen OLEMASSAOLO
+  # tarkistetaan aina kun sellainen oli olemassa (regressio #0: tekstitykset katosivat hiljaa).
+  mina=$(printf '%s' "$j" | jq -r 'if (((.src_audio//[])|length)>0 or ((.want_audio//[])|length)>0) then 1 else 0 end')
+  mins=$(printf '%s' "$j" | jq -r 'if (((.src_subs//[])|length)>0  or ((.want_subs//[])|length)>0)  then 1 else 0 end')
+  verify_structural "$tmp" "${exp:-}" "${mina:-0}" "${mins:-0}"
 }
 
 # --- worker (§4) ------------------------------------------------------------------------------

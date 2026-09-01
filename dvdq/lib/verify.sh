@@ -28,17 +28,21 @@ _vf_readable() {      # ffprobe lukee ilman virhettä (tyhjä stderr) → tiedos
 }
 
 # --- (a) rakenteellinen verifiointi ------------------------------------------------------------
-# verify_structural <file> <expected_duration_s> <min_audio> → rc 0 ok. Aseta VERIFY_REASON jos hylkää.
+# verify_structural <file> <expected_duration_s> <min_audio> [min_subs] → rc 0 ok. Aseta VERIFY_REASON jos hylkää.
+# min_subs: odotettujen tekstitysraitojen alaraja. Kun lähteellä OLI tekstitys (min_subs>=1) mutta
+# ulostulossa on 0, se on rakenteellinen vika — juuri se hiljainen katoaminen jonka regressio #0
+# (scan luki SubtitleListiä väärältä tasolta) aiheutti koko Looper-katastrofissa 2026-09-01.
 VERIFY_REASON=""
 verify_structural() {
-  local f=$1 exp=$2 minaudio=$3
+  local f=$1 exp=$2 minaudio=$3 minsubs=${4:-0}
   VERIFY_REASON=""
   [ -s "$f" ]        || { VERIFY_REASON="tyhjä/puuttuva tiedosto"; return 1; }
   _vf_readable "$f"  || { VERIFY_REASON="ffprobe-lukuvirhe (katkennut/korruptoitunut)"; return 1; }
-  local nv na dur tol lastpts
-  nv=$(_vf_stream_count "$f" v); na=$(_vf_stream_count "$f" a)
-  [ "${nv:-0}" -ge 1 ]        || { VERIFY_REASON="ei videoraitaa"; return 1; }
+  local nv na ns dur tol lastpts
+  nv=$(_vf_stream_count "$f" v); na=$(_vf_stream_count "$f" a); ns=$(_vf_stream_count "$f" s)
+  [ "${nv:-0}" -ge 1 ]           || { VERIFY_REASON="ei videoraitaa"; return 1; }
   [ "${na:-0}" -ge "$minaudio" ] || { VERIFY_REASON="ääniraitoja $na < odotettu $minaudio"; return 1; }
+  [ "${ns:-0}" -ge "$minsubs" ]  || { VERIFY_REASON="tekstitysraitoja $ns < odotettu $minsubs (lähteellä oli tekstitys)"; return 1; }
   if [ -n "$exp" ] && [ "$exp" != null ] && [ "$exp" -gt 0 ] 2>/dev/null; then
     dur=$(_vf_duration "$f"); [ -n "$dur" ] || { VERIFY_REASON="kestoa ei saatu"; return 1; }
     # toleranssi = max(2, ceil(0.005*exp)) sekuntia (§8.4a) — awk-numeriikka (§2.4)
@@ -71,10 +75,10 @@ verify_soft() {
 }
 
 # --- yhdistetty: verify_file → rakenteinen JSON-tulos ------------------------------------------
-# verify_file <file> <expected_duration_s> <min_audio> → JSON {ok, reason, warnings:[]}, rc 0 jos ok.
+# verify_file <file> <expected_duration_s> <min_audio> [min_subs] → JSON {ok, reason, warnings:[]}, rc 0 jos ok.
 verify_file() {
-  local f=$1 exp=${2:-} minaudio=${3:-0} rc warns
-  if verify_structural "$f" "$exp" "$minaudio"; then rc=0; else rc=1; fi
+  local f=$1 exp=${2:-} minaudio=${3:-0} minsubs=${4:-0} rc warns
+  if verify_structural "$f" "$exp" "$minaudio" "$minsubs"; then rc=0; else rc=1; fi
   warns=$(verify_soft "$f" "$exp" | jq -R . | jq -cs .)
   jq -cn --argjson ok "$([ $rc = 0 ] && echo true || echo false)" \
         --arg reason "$VERIFY_REASON" --argjson warnings "${warns:-[]}" \
@@ -109,10 +113,14 @@ _verify_encoding_running() {  # käynnissä olevien encoding-jobien määrä
   local n=0 p; for p in "$STATE/jobs"/*.json; do [ -e "$p" ]&&[ "$(jq -r .status "$p")" = encoding ]&&n=$((n+1)); done; printf '%s' "$n"
 }
 _verify_one() {  # tulosta yhden jobin verify-tulos (id + verify_file)
-  local id=$1 j f exp mina
+  local id=$1 j f exp mina mins
   j=$(job_read "$id") || { err_out id_not_found id "$id" "olemassa oleva job"; return 1; }
   f="$(printf '%s' "$j" | jq -r '.dest_dir')/$(printf '%s' "$j" | jq -r '.out_name')"
   exp=$(printf '%s' "$j" | jq -r '.duration_s // ""')
-  mina=$(printf '%s' "$j" | jq -r 'if ((.want_audio // [])|length)>0 then 1 else 0 end')  # R8 alaraja
-  verify_file "$f" "$exp" "$mina" | jq -c --arg id "$id" '{id:$id} + .'
+  # Alaraja 1 (ei tarkka määrä): odota raitaa jos lähteellä TAI valinnassa oli sellainen. src_* kuvaa
+  # mitä levyllä oikeasti oli (want_* voi olla tyhjä esim. vanhalla kääreellä). R8: ei tarkkaa määrää,
+  # ettei kommenttiheuristiikka väärin hylkää — mutta raidan OLEMASSAOLO on pakko (regressio #0).
+  mina=$(printf '%s' "$j" | jq -r 'if (((.src_audio//[])|length)>0 or ((.want_audio//[])|length)>0) then 1 else 0 end')
+  mins=$(printf '%s' "$j" | jq -r 'if (((.src_subs//[])|length)>0  or ((.want_subs//[])|length)>0)  then 1 else 0 end')
+  verify_file "$f" "$exp" "$mina" "$mins" | jq -c --arg id "$id" '{id:$id} + .'
 }
