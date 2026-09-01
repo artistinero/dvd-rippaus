@@ -103,7 +103,11 @@ _hb_build() {
   ws=$(printf '%s' "$j" | jq -r '(.want_subs  // []) | join(",")')
   _out=( -i "$src" --title "$title" -o "$tmp" -f av_mkv -e "$enc" -q "$crf" )
   [ -n "$wa" ] && _out+=( --audio-lang-list "$wa" --all-audio ) || _out+=( -a 1 )
-  [ -n "$ws" ] && _out+=( --subtitle-lang-list "$ws" --all-subtitles )
+  # SUOJAVERKKO: tekstityksiä EI saa koskaan pudottaa hiljaa. Jos want_subs on tyhjä (esim. skannaus
+  # ei tuottanut kieliä), otetaan silti KAIKKI lähteen tekstitykset mukaan (--all-subtitles yksin =
+  # kaikki kielet). Kielilista rajaa vain jos se on annettu. Ylimääräinen tekstitys on harmiton,
+  # puuttuva ei. (Regressio 2026-09-01: scan.sh luki SubtitleListiä väärältä tasolta → aina tyhjä.)
+  [ -n "$ws" ] && _out+=( --subtitle-lang-list "$ws" ); _out+=( --all-subtitles )
   [ -n "$crop" ] && _out+=( --crop "$crop" )
   case $deint in auto) _out+=( --comb-detect --decomb );; on) _out+=( --deinterlace );; esac
 }

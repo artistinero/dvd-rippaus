@@ -41,8 +41,8 @@ scan_title() {
      fps: (if ($ti.FrameRate.Den//0)>0 then (($ti.FrameRate.Num/($ti.FrameRate.Den))|floor) else null end),
      interlaced: ($ti.InterlaceDetected // false),
      crop: (if ($ti.Crop|type=="array") then ($ti.Crop|map(tostring)|join(":")) else null end),
-     src_audio: [ (.AudioList // [])[] | (.LanguageCode // "und") ],
-     src_subs:  [ (.SubtitleList // [])[] | (.LanguageCode // "und") ] }
+     src_audio: [ ($ti.AudioList // [])[] | (.LanguageCode // "und") ],
+     src_subs:  [ ($ti.SubtitleList // [])[] | (.LanguageCode // "und") ] }
     | .dar = (if .width and .height and .height>0 then ((.width/.height*100|floor)/100|tostring) else null end)
     | .format = (if .fps==25 then "PAL" elif .fps==null then null else "NTSC" end)'
 }
