@@ -16,8 +16,17 @@ DEV="${1:-/dev/sr1}"
 if [ -n "${DVDQ_RIPPAA_SCANFILE:-}" ]; then
   scanfile="$DVDQ_RIPPAA_SCANFILE"
 else
-  printf 'Ripataan ja skannataan %s ... (tämä voi kestää)\n' "$DEV" >&2
-  out=$("$DVDQ" rip "$DEV" 2>/dev/null | grep '"ok"' | tail -1)
+  printf 'Ripataan ja skannataan %s — dvdbackup kopioi KOKO levyn, tämä kestää tyypillisesti\n' "$DEV" >&2
+  printf '10–30 min. ÄLÄ keskeytä; kysymykset tulevat kun rippaus valmistuu.\n' >&2
+  _tmpout=$(mktemp)
+  "$DVDQ" rip "$DEV" >"$_tmpout" 2>/dev/null &
+  _rp=$!; _s=0
+  while kill -0 "$_rp" 2>/dev/null; do
+    printf '\r  …rippaus/skannaus käynnissä  %dm%02ds  ' $((_s/60)) $((_s%60)) >&2
+    sleep 5; _s=$((_s+5))
+  done
+  printf '\r%60s\r' '' >&2; wait "$_rp"
+  out=$(grep '"ok"' "$_tmpout" | tail -1); rm -f "$_tmpout"
   if [ "$(printf '%s' "$out" | jq -r '.ok // false')" != true ]; then
     printf 'Rippaus/skannaus epäonnistui: %s\n' "$out" >&2; exit 1
   fi
