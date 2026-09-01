@@ -24,6 +24,7 @@ dvdq <komento> [argumentit] — kaikki palauttavat JSON-kuoren stdoutiin (§6.1)
   scan <dvd_dir>                       skannaa tittelit (scans/<sha1>.json)
   enqueue --source S --title N --kind K --name NIMI [--year --season --episode --role --force]
   dispatch [--once]                    enkoodausdaemon
+  daemon start|stop|status|ensure      on-demand-daemonin ohjaus (jaettu CLI + GUI)
   thermal [--backup]                   lämpövahti
   status                               tilanne (ok-kuori)
   review-problematic                   failed/broken-jobit
@@ -41,7 +42,7 @@ EOF
 # kaatua/jäädä NAS-statiin. thermal/pause/resume = hätäohjaus; scan/rip kirjoittavat vain lokaalia
 # (STATE / WORK_DIR), eivät DEST_ROOTia → toimivat myös NAS-katkon aikana.
 _is_readonly_cmd() {
-  case $1 in status|review-problematic|reconcile|thermal|verify|scan|rip|pause|resume) return 0;; *) return 1;; esac
+  case $1 in status|review-problematic|reconcile|thermal|verify|scan|rip|pause|resume|daemon) return 0;; *) return 1;; esac
 }
 
 main() {
@@ -67,6 +68,7 @@ main() {
     retry)    cmd_retry "$@" ;;
     status)   cmd_status "$@" ;;
     dispatch) cmd_dispatch "$@" ;;
+    daemon)   cmd_daemon "$@" ;;
     thermal)  if [ "${1-}" = --backup ]; then thermal_watchdog backup; else thermal_watchdog main; fi ;;
     verify)   cmd_verify "$@" ;;
     cleanup)  cmd_cleanup "$@" ;;

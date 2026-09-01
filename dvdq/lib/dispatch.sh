@@ -288,7 +288,30 @@ cmd_dispatch() {
   recover
   if [ "$once" = 1 ]; then dispatch_pass; exec {DFD}>&-; return 0; fi
   trap 'exec {DFD}>&- 2>/dev/null; exit 0' TERM INT
-  while true; do dispatch_pass; _ensure_backup_watchdog; sleep "${CFG[LOOP_INTERVAL]}"; done
+  local idle_since=0 idle_limit="${CFG[DAEMON_IDLE_STOP_S]:-0}"
+  while true; do
+    dispatch_pass
+    _ensure_backup_watchdog
+    # On-demand-sammutus (§ daemon-elinkaari): kun jono on tyhjä, workereita ei ole eikä paussi ole
+    # päällä, käynnistetään idle-kello; kun se ylittää idle_limitin, daemon sammuttaa itsensä siististi.
+    # idle_limit=0 → perinteinen always-on (ei koskaan sammu itsestään).
+    if [ "${idle_limit:-0}" -gt 0 ] 2>/dev/null \
+       && [ -z "$(_next_pending_id)" ] && [ "$(count_running)" -eq 0 ] && [ ! -f "$STATE/paused" ]; then
+      [ "$idle_since" = 0 ] && idle_since=$(date +%s)
+      [ $(( $(date +%s) - idle_since )) -ge "$idle_limit" ] && _daemon_idle_shutdown
+    else
+      idle_since=0
+    fi
+    sleep "${CFG[LOOP_INTERVAL]}"
+  done
+}
+
+# _daemon_idle_shutdown — puhdas on-demand-alasajo: pysäytä lämpövahti (ei enkoodausta käynnissä → ei
+# suojattavaa) ja poistu koodilla 0. Unitin Restart=on-failure EI elvytä puhtaan poistumisen jälkeen.
+# sudo -n = passwordless; jos oikeutta ei ole, thermal jää päälle (harmiton, ~0 kuorma).
+_daemon_idle_shutdown() {
+  command -v systemctl >/dev/null 2>&1 && sudo -n systemctl stop dvdq-thermal >/dev/null 2>&1
+  exit 0
 }
 
 # _ensure_backup_watchdog — §8.2 fail-safe (>6× vanhentuma): jos lämpövahdin heartbeat on ollut

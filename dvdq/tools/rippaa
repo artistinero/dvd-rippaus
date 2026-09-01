@@ -15,6 +15,10 @@ source "$HERE/../lib/scan.sh"; source "$HERE/../lib/rip.sh"
 config_load
 DEV="${1:-/dev/sr1}"
 
+# On-demand-daemon: rippaus käynnistää enkoodausdaemonin itse → et voi unohtaa, eikä sen tarvitse
+# pyöriä taustalla silloin kun et rippaa. Sama komento jota tuleva GUI kutsuu käynnistyessään.
+"$DVDQ" daemon ensure >/dev/null 2>&1 || true
+
 # _lsdvd_titles <device> → "titteli kesto_s luvut" per rivi (nopea, ei kopioi). Luvut = chapters
 # (parhaan kyvyn mukaan; tyhjä jos ei jäsenny). Tyhjä jos ei lue.
 _lsdvd_titles() {

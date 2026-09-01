@@ -78,6 +78,9 @@ declare -gA CFG_DEFAULTS=(
   [RIP_MIN_FREE_GB]=40   [DEST_MIN_FREE_GB]=20
   [RIP_AHEAD_MAX_GB]=60  [QUARANTINE_MAX_GB]=100
   [LOOP_INTERVAL]=5
+  # On-demand-daemon: dispatcher sammuttaa itsensä (+ thermalin) kun jono on ollut tyhjä eikä
+  # enkoodauksia ole käynnissä näin monta sekuntia. 0 = ei koskaan (perinteinen always-on).
+  [DAEMON_IDLE_STOP_S]=900
 )
 declare -gA CFG=()   # ladatut arvot
 
@@ -115,7 +118,7 @@ config_validate_common() {
   # ei-negatiiviset kokonaisluvut
   for k in PARALLEL PARALLEL_MAX CRF BACKUP_RETENTION_DAYS SCAN_TTL_DAYS TEMP_WARN TEMP_KILL \
            MIN_DURATION READ_ERROR_MAX SCAN_TIMEOUT RIP_MIN_FREE_GB DEST_MIN_FREE_GB \
-           RIP_AHEAD_MAX_GB QUARANTINE_MAX_GB LOOP_INTERVAL; do
+           RIP_AHEAD_MAX_GB QUARANTINE_MAX_GB LOOP_INTERVAL DAEMON_IDLE_STOP_S; do
     v=${CFG[$k]}
     is_uint "$v" || { err_out config_invalid "$k" "$v" "ei-negatiivinen kokonaisluku"; return 1; }
   done

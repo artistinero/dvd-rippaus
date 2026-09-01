@@ -198,6 +198,28 @@ cmd_retry() {
 cmd_pause()  { : > "$STATE/paused"; ok_out '"paused":true'; }
 cmd_resume() { rm -f "$STATE/paused"; ok_out '"paused":false'; }
 
+# --- daemon-elinkaaren hallinta (on-demand; jaettu CLI:n JA tulevan GUI:n kesken) ----------------
+# cmd_daemon <start|stop|status|ensure> — ohjaa dispatch- + thermal-systemd-yksiköitä yhtenä parina.
+# ensure = käynnistä jos jompikumpi ei ole aktiivinen (idempotentti; rippaa/GUI kutsuu tätä alussa).
+# Palauttaa JSON-tilan (GUI-ystävällinen). sudo -n = passwordless; ilman oikeutta systemctl-ohjaus ei toimi.
+_daemon_active() { systemctl is-active --quiet "$1" 2>/dev/null; }
+_daemon_status_json() {
+  ok_out "$(printf '"dispatch":"%s","thermal":"%s"' \
+    "$(systemctl is-active dvdq-dispatch 2>/dev/null || echo unknown)" \
+    "$(systemctl is-active dvdq-thermal  2>/dev/null || echo unknown)")"
+}
+cmd_daemon() {
+  local action=${1:-status} units="dvdq-dispatch dvdq-thermal"
+  case $action in
+    start)  sudo -n systemctl start $units >/dev/null 2>&1; _daemon_status_json ;;
+    stop)   sudo -n systemctl stop  $units >/dev/null 2>&1; _daemon_status_json ;;
+    ensure) { _daemon_active dvdq-dispatch && _daemon_active dvdq-thermal; } \
+              || sudo -n systemctl start $units >/dev/null 2>&1; _daemon_status_json ;;
+    status) _daemon_status_json ;;
+    *) err_out bad_state args "$action" "start|stop|status|ensure"; return 1 ;;
+  esac
+}
+
 # review-problematic (§6.2) — listaa failed/broken-jobit (problematic/). LUKUKOMENTO.
 cmd_review_problematic() {
   local p arr
