@@ -1,115 +1,140 @@
 #!/usr/bin/env bash
-# dvdq/tools/rippaa — interaktiivinen rippaus→vahvistus→enqueue-kääre. PRESENTAATIOKERROS (saa kysyä;
-# ydin pysyy ei-interaktiivisena). Rippaa levyn, näyttää tittelit kestoineen + pääelokuva-ehdotuksen,
-# kysyy nimen/tyypin, ja enqueuaa jokaisen valitun tittelin TÄYSINE METADATOINEEN (→ mitattu ETA toimii).
-# Testihook: DVDQ_RIPPAA_SCANFILE=<valmis scans-json> ohittaa rippauksen (logiikan testaus ilman levyä).
+# dvdq/tools/rippaa — interaktiivinen rippaus. OIKEA JÄRJESTYS: kysy tiedot ENSIN (levyn nopeasta
+# sisällysluettelosta), sitten rippaa valvomatta, sitten enqueuaa itsestään → voit poistua.
+#   1. sulje kelkka + lue tittelit (lsdvd, sekunteja, EI kopioi levyä)
+#   2. näytä tittelit kestoineen + pääelokuva-ehdotus, kysy tyyppi/nimi/pää/ekstrat
+#   3. dvdbackup kopioi koko levyn (10–30 min, VALVOMATTA)
+#   4. enqueuaa valitut tittelit metadatoineen → dispatcher-daemon enkoodaa automaattisesti
+# Testihook: DVDQ_RIPPAA_SCANFILE=<valmis scans-json> → ohita levy, tee vain ask+enqueue (logiikan testaus).
 set -uo pipefail
 _u=$(locale -a 2>/dev/null | grep -iE '^C\.utf-?8$' | head -1); export LC_ALL="${_u:-C}"; unset _u
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 DVDQ="$HERE/../dvdq"
-source "$HERE/../lib/common.sh"; source "$HERE/../lib/jobs.sh"; source "$HERE/../lib/scan.sh"
+source "$HERE/../lib/common.sh"; source "$HERE/../lib/jobs.sh"
+source "$HERE/../lib/scan.sh"; source "$HERE/../lib/rip.sh"
 config_load
-
 DEV="${1:-/dev/sr1}"
 
-# --- 1. rippaus + skannaus (tai testihook) ----------------------------------------------------
-if [ -n "${DVDQ_RIPPAA_SCANFILE:-}" ]; then
-  scanfile="$DVDQ_RIPPAA_SCANFILE"
-else
-  printf 'Ripataan ja skannataan %s — dvdbackup kopioi KOKO levyn, tämä kestää tyypillisesti\n' "$DEV" >&2
-  printf '10–30 min. ÄLÄ keskeytä; kysymykset tulevat kun rippaus valmistuu.\n' >&2
-  _tmpout=$(mktemp)
-  "$DVDQ" rip "$DEV" >"$_tmpout" 2>/dev/null &
-  _rp=$!; _s=0
-  while kill -0 "$_rp" 2>/dev/null; do
-    printf '\r  …rippaus/skannaus käynnissä  %dm%02ds  ' $((_s/60)) $((_s%60)) >&2
-    sleep 5; _s=$((_s+5))
+# _lsdvd_titles <device> → "titteli kesto_s" per rivi (nopea, ei kopioi). Tyhjä jos ei lue.
+_lsdvd_titles() {
+  lsdvd "$1" 2>/dev/null \
+    | sed -n 's/^Title: 0*\([0-9]\+\), Length: \([0-9]\+\):\([0-9]\+\):\([0-9]\+\).*/\1 \2 \3 \4/p' \
+    | awk '{printf "%s %d\n", $1, $2*3600+$3*60+$4}'
+}
+
+# --- kysy luokittelu (yhteinen, käyttää titles-listaa "titteli kesto_s") ----------------------
+# asettaa globaalit: kind name year season ep0 mainsel eps extras
+ask_classification() {
+  local titles=$1 mainsug=$2
+  echo "════════ Levyn tittelit ════════"
+  printf '%s\n' "$titles" | sort -k2 -rn | while read -r t d; do
+    printf '  Titteli %-3s %4d min%s\n' "$t" "$((d/60))" "$([ "$t" = "$mainsug" ] && echo '   ⟵ pisin (pääelokuva-ehdotus)')"
   done
-  printf '\r%60s\r' '' >&2; wait "$_rp"
-  out=$(grep '"ok"' "$_tmpout" | tail -1); rm -f "$_tmpout"
-  if [ "$(printf '%s' "$out" | jq -r '.ok // false')" != true ]; then
-    printf 'Rippaus/skannaus epäonnistui: %s\n' "$out" >&2; exit 1
+  echo "════════════════════════════════"
+  read -rp "Tyyppi [movie/series/doc/music/misc] (oletus movie): " kind; kind=${kind:-movie}
+  name=""; while [ -z "$name" ]; do read -rp "Nimi (pakollinen): " name; done
+  year=""; season=""; ep0=1; mainsel=""; eps=""; extras=""
+  case $kind in
+    movie|doc) read -rp "Vuosi (valinnainen): " year ;;
+    series)    read -rp "Kausi (numero): " season; read -rp "Ensimmäisen jakson numero [1]: " ep0; ep0=${ep0:-1} ;;
+  esac
+  local mind="${CFG[MIN_DURATION]}"
+  if [ "$kind" = series ]; then
+    read -rp "Jakso-tittelit järjestyksessä (välilyönnein, tyhjä = kaikki >= $((mind/60)) min): " eps
+    [ -z "$eps" ] && eps=$(printf '%s\n' "$titles" | awk -v m="$mind" '$2>=m{print $1}' | sort -n | tr '\n' ' ')
+    read -rp "Ekstra-tittelit (välilyönnein, tyhjä = ei ekstroja): " extras
+  else
+    read -rp "Pääelokuvan titteli [${mainsug}]: " mainsel; mainsel=${mainsel:-$mainsug}
+    read -rp "Ekstra-tittelit (välilyönnein, 'auto' = kaikki muut >= $((mind/60)) min, tyhjä = ei ekstroja): " extras
+    [ "$extras" = auto ] && extras=$(printf '%s\n' "$titles" | awk -v m="$mind" -v x="$mainsel" '$2>=m && $1!=x{print $1}' | sort -n | tr '\n' ' ')
   fi
-  scanfile=$(_scan_path "$(printf '%s' "$out" | jq -r '.disc_key')")
-fi
-[ -f "$scanfile" ] || { echo "Scan-tiedostoa ei löydy: $scanfile" >&2; exit 1; }
+  echo "──────── Yhteenveto ────────"
+  echo "  Tyyppi: $kind   Nimi: $name   ${year:+Vuosi: $year }${season:+Kausi: $season (jaksot alkaen $ep0)}"
+  [ "$kind" = series ] && echo "  Jaksot (tittelit): $eps" || echo "  Pääelokuva: titteli $mainsel"
+  echo "  Ekstrat (tittelit): ${extras:-—}"
+  echo "────────────────────────────"
+  local c; read -rp "Aloitetaanko rippaus näillä tiedoilla? [K/e]: " c; case ${c:-K} in [eEnN]*) echo "Peruttu."; exit 0;; esac
+}
 
-src=$(jq -r '.source' "$scanfile")
-mainsug=$(jq -r '.main_suggestion // empty' "$scanfile")
-conf=$(jq -r '.confidence // "?"' "$scanfile")
-
-# --- 2. näytä tittelit (ok, pisin ensin) ------------------------------------------------------
-echo "════════ Levyn tittelit ════════"
-jq -r --argjson ms "${mainsug:-null}" '
-  .titles | map(select(.status=="ok")) | sort_by(-(.duration_s // 0)) | .[] |
-  "  Titteli \(.title): \((.duration_s // 0)/60 | floor) min\(if .title==$ms then "   ⟵ PÄÄELOKUVA-EHDOTUS" else "" end)  [\(.width)x\(.height) \(.format // "?")]"' "$scanfile"
-brokn=$(jq -r '[.titles[]|select(.status=="broken")]|length' "$scanfile")
-[ "$brokn" -gt 0 ] && echo "  (+ $brokn vaurioitunutta titteliä ohitettu)"
-echo "  Pääelokuva-ehdotus: titteli ${mainsug:-?} (luottamus: $conf)"
-echo "════════════════════════════════"
-
-# --- 3. kysy luokittelu -----------------------------------------------------------------------
-read -rp "Tyyppi [movie/series/doc/music/misc] (oletus movie): " kind; kind=${kind:-movie}
-name=""; while [ -z "$name" ]; do read -rp "Nimi (pakollinen): " name; done
-year=""; season=""; ep0=1
-case $kind in
-  movie|doc) read -rp "Vuosi (valinnainen): " year ;;
-  series)    read -rp "Kausi (numero): " season; read -rp "Ensimmäisen jakson numero [1]: " ep0; ep0=${ep0:-1} ;;
-esac
-
-if [ "$kind" = series ]; then
-  read -rp "Jakso-tittelit järjestyksessä (välilyönnein, tyhjä = kaikki ok >= ${CFG[MIN_DURATION]}s): " eps
-  [ -z "$eps" ] && eps=$(jq -r --argjson md "${CFG[MIN_DURATION]}" '.titles|map(select(.status=="ok" and (.duration_s//0)>=$md))|sort_by(.title)|.[].title' "$scanfile" | tr '\n' ' ')
-  read -rp "Ekstra-tittelit (välilyönnein, tyhjä = ei ekstroja): " extras
-else
-  read -rp "Pääelokuvan titteli [${mainsug:-}]: " maint; maint=${maint:-$mainsug}
-  read -rp "Ekstra-tittelit (välilyönnein, 'auto' = kaikki muut ok >= ${CFG[MIN_DURATION]}s, tyhjä = ei ekstroja): " extras
-  if [ "$extras" = auto ]; then
-    extras=$(jq -r --argjson md "${CFG[MIN_DURATION]}" --argjson m "${maint:-null}" \
-      '.titles|map(select(.status=="ok" and (.duration_s//0)>=$md and .title!=$m))|sort_by(.title)|.[].title' "$scanfile" | tr '\n' ' ')
-  fi
-fi
-
-# --- 4. yhteenveto + vahvistus ----------------------------------------------------------------
-echo "──────── Yhteenveto ────────"
-echo "  Tyyppi: $kind   Nimi: $name   ${year:+Vuosi: $year}${season:+Kausi: $season (jaksot alkaen $ep0)}"
-[ "$kind" = series ] && echo "  Jaksot (tittelit): $eps" || echo "  Pääelokuva: titteli $maint"
-echo "  Ekstrat (tittelit): ${extras:-—}"
-echo "────────────────────────────"
-read -rp "Enqueuaanko nämä? [K/e]: " ok; case ${ok:-K} in [eEnN]*) echo "Peruttu."; exit 0;; esac
-
-# --- 5. enqueue metadatoineen -----------------------------------------------------------------
-# _enq <title> <role> [episode] — poimii tittelin metadatan scanista ja kutsuu dvdq enqueue.
+# _enq <source> <title> <role> [episode] — poimii tittelin metadatan (scan_title ripatuista VOBeista)
+# ja enqueuaa. Metadata → mitattu ETA + raitapolitiikka toimivat.
 _enq() {
-  local t=$1 role=$2 epi=${3:-}
-  local ti; ti=$(jq -c --argjson t "$t" '.titles[]|select(.title==$t)' "$scanfile")
-  [ -n "$ti" ] || { echo "  (titteli $t: ei scanissa, ohitetaan)"; return; }
+  local src=$1 t=$2 role=$3 epi=${4:-} ti
+  ti=$(scan_title "$src" "$t" 2>/dev/null)
+  local st; st=$(printf '%s' "$ti" | jq -r '.status // "ok"' 2>/dev/null)
   local -a a=(--source "$src" --title "$t" --kind "$kind" --name "$name" --role "$role")
   [ -n "$year" ]   && a+=(--year "$year")
   [ -n "$season" ] && a+=(--season "$season")
   [ -n "$epi" ]    && a+=(--episode "$epi")
-  # metadata scanista (kestot ym. → mitattu ETA)
-  local d w h dar fps fmt il crop subs aud
-  d=$(jq -r '.duration_s // empty' <<<"$ti"); w=$(jq -r '.width // empty' <<<"$ti"); h=$(jq -r '.height // empty' <<<"$ti")
-  dar=$(jq -r '.dar // empty' <<<"$ti"); fps=$(jq -r '.fps // empty' <<<"$ti"); fmt=$(jq -r '.format // empty' <<<"$ti")
-  il=$(jq -r '.interlaced // false' <<<"$ti"); crop=$(jq -r '.crop // empty' <<<"$ti")
-  subs=$(jq -c '.src_subs // []' <<<"$ti"); aud=$(jq -c '.src_audio // []' <<<"$ti")
-  [ -n "$d" ]   && a+=(--duration "$d");   [ -n "$w" ] && a+=(--width "$w"); [ -n "$h" ] && a+=(--height "$h")
-  [ -n "$dar" ] && a+=(--dar "$dar");      [ -n "$fps" ] && a+=(--fps "$fps"); [ -n "$fmt" ] && a+=(--format "$fmt")
-  a+=(--interlaced "$il");                 [ -n "$crop" ] && a+=(--crop "$crop")
-  a+=(--src-subs "$subs" --src-audio "$aud")
+  if [ "$st" = ok ]; then
+    local d w h dar fps fmt il crop subs aud
+    d=$(jq -r '.duration_s // empty' <<<"$ti"); w=$(jq -r '.width // empty' <<<"$ti"); h=$(jq -r '.height // empty' <<<"$ti")
+    dar=$(jq -r '.dar // empty' <<<"$ti"); fps=$(jq -r '.fps // empty' <<<"$ti"); fmt=$(jq -r '.format // empty' <<<"$ti")
+    il=$(jq -r '.interlaced // false' <<<"$ti"); crop=$(jq -r '.crop // empty' <<<"$ti")
+    subs=$(jq -c '.src_subs // []' <<<"$ti"); aud=$(jq -c '.src_audio // []' <<<"$ti")
+    [ -n "$d" ] && a+=(--duration "$d"); [ -n "$w" ] && a+=(--width "$w"); [ -n "$h" ] && a+=(--height "$h")
+    [ -n "$dar" ] && a+=(--dar "$dar"); [ -n "$fps" ] && a+=(--fps "$fps"); [ -n "$fmt" ] && a+=(--format "$fmt")
+    a+=(--interlaced "$il"); [ -n "$crop" ] && a+=(--crop "$crop"); a+=(--src-subs "$subs" --src-audio "$aud")
+  fi
   local r; r=$("$DVDQ" enqueue "${a[@]}" 2>&1)
-  if [ "$(printf '%s' "$r"|jq -r '.ok // false' 2>/dev/null)" = true ]; then
+  if [ "$(printf '%s' "$r" | jq -r '.ok // false' 2>/dev/null)" = true ]; then
     echo "  ✓ titteli $t → $role $([ -n "$epi" ] && echo "(jakso $epi)")"
-  else echo "  ✗ titteli $t: $(printf '%s' "$r"|jq -r '.error // .' 2>/dev/null)"; fi
+  else echo "  ✗ titteli $t: $(printf '%s' "$r" | jq -r '.error // .' 2>/dev/null)"; fi
 }
 
-n=0
-if [ "$kind" = series ]; then
-  epi=$ep0; for t in $eps; do _enq "$t" main "$epi"; epi=$((epi+1)); n=$((n+1)); done
-else
-  [ -n "${maint:-}" ] && { _enq "$maint" main; n=$((n+1)); }
-fi
-for t in $extras; do _enq "$t" extra; n=$((n+1)); done
+enqueue_selected() {   # <source>
+  local src=$1 n=0 t epi
+  if [ "$kind" = series ]; then
+    epi=$ep0; for t in $eps; do _enq "$src" "$t" main "$epi"; epi=$((epi+1)); n=$((n+1)); done
+  else
+    [ -n "$mainsel" ] && { _enq "$src" "$mainsel" main; n=$((n+1)); }
+  fi
+  for t in $extras; do _enq "$src" "$t" extra; n=$((n+1)); done
+  echo "Valmis: $n titteliä lisätty jonoon. Dispatcher enkoodaa automaattisesti — seuraa: dvdq-tila"
+}
 
-echo "Valmis: $n titteliä lisätty jonoon. Tila: dvdq-tila"
+# ══════════ TESTIHOOK: valmis scanfile → vain ask+enqueue ══════════
+if [ -n "${DVDQ_RIPPAA_SCANFILE:-}" ]; then
+  sf="$DVDQ_RIPPAA_SCANFILE"; src=$(jq -r '.source' "$sf")
+  titles=$(jq -r '.titles[]|select(.status=="ok")|"\(.title) \(.duration_s // 0)"' "$sf")
+  mainsug=$(jq -r '.main_suggestion // (.titles|map(select(.status=="ok"))|max_by(.duration_s).title)' "$sf")
+  ask_classification "$titles" "$mainsug"
+  enqueue_selected "$src"; exit 0
+fi
+
+# ══════════ 1. sisällysluettelo ENSIN (lsdvd, nopea) ══════════
+echo "Suljetaan kelkka ja luetaan levyn sisällysluettelo ($DEV)..." >&2
+_ensure_disc "$DEV" || { echo "Ei luettavaa levyä 60 s:ssa (kelkka auki tai tyhjä?)." >&2; exit 1; }
+titles=$(_lsdvd_titles "$DEV")
+[ -n "$titles" ] || { echo "Tittelien luku epäonnistui (viallinen/kopiosuojattu levy?)." >&2; exit 1; }
+mainsug=$(printf '%s\n' "$titles" | sort -k2 -n | tail -1 | awk '{print $1}')
+
+# ══════════ 2. kysy tiedot (ENNEN pitkää rippausta) ══════════
+ask_classification "$titles" "$mainsug"
+
+# ══════════ 3. dvdbackup VALVOMATTA (nyt voit poistua) ══════════
+echo "──────────────────────────────"
+echo "Rippaus alkaa — voit POISTUA. Loppu tapahtuu itsestään (rippaus → jono → enkoodaus)."
+discdir=$(next_disc_dir)
+printf 'dvdbackup kopioi koko levyn (10–30 min)...\n' >&2
+( rip_backup "$DEV" "$discdir" ) &
+_rp=$!; _s=0
+while kill -0 "$_rp" 2>/dev/null; do
+  sz=$(du -sh "$discdir" 2>/dev/null | cut -f1)
+  printf '\r  …ripataan  %dm%02ds  kopioitu %s   ' $((_s/60)) $((_s%60)) "${sz:-0}" >&2
+  sleep 5; _s=$((_s+5))
+done
+printf '\r%70s\r' '' >&2; wait "$_rp" || { echo "dvdbackup epäonnistui." >&2; exit 1; }
+if [ "${RIP_READ_ERRORS:-0}" -gt "${CFG[READ_ERROR_MAX]}" ]; then
+  echo "VAROITUS: $RIP_READ_ERRORS lukuvirhettä (> ${CFG[READ_ERROR_MAX]}) — levy voi olla vaurioitunut." >&2
+fi
+vts=$(find "$discdir" -type d -iname VIDEO_TS 2>/dev/null | head -1)
+[ -n "$vts" ] || { echo "VIDEO_TS ei löytynyt rippauksen jälkeen." >&2; exit 1; }
+
+# ══════════ RIPPAUS VALMIS → AVAA KELKKA (huomaat sen; levyä ei enää tarvita) ══════════
+command -v eject >/dev/null 2>&1 && eject "$DEV" 2>/dev/null
+echo "✔ RIPPAUS VALMIS — kelkka avattu, voit ottaa levyn / vaihtaa seuraavan."
+
+# ══════════ 4. enqueue valitut (metadata ripatuista VOBeista) ══════════
+echo "Lisätään tittelit jonoon (enkoodaus jatkuu taustalla, levyä ei tarvita)..."
+enqueue_selected "$(dirname "$vts")"
