@@ -22,17 +22,29 @@ _lsdvd_titles() {
     | awk '{printf "%s %d\n", $1, $2*3600+$3*60+$4}'
 }
 
+# _disc_label <device> → levyn nimiöstä (lsdvd "Disc Title:") NIMIEHDOTUS: alaviivat väleiksi,
+# yleiset roskatunnisteet (DVD9/NTSC/DISC1…) pois, sanat title-caseen. Vain EHDOTUS — käyttäjä
+# vahvistaa/korjaa (nimiö on usein karkea/lyhennetty, esim. jakelijatagi).
+_disc_label() {
+  lsdvd "$1" 2>/dev/null | sed -n 's/^Disc Title: //p' | head -1 \
+    | sed -E 's/_/ /g; s/\b(DVD ?[59]?|BLURAY|NTSC|PAL|DISC ?[0-9]+|D[0-9]+|SIDE ?[AB]|R[0-9])\b//gi; s/  +/ /g; s/^ +//; s/ +$//' \
+    | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2)); print}'
+}
+
 # --- kysy luokittelu (yhteinen, käyttää titles-listaa "titteli kesto_s") ----------------------
 # asettaa globaalit: kind name year season ep0 mainsel eps extras
 ask_classification() {
-  local titles=$1 mainsug=$2
+  local titles=$1 mainsug=$2 label=${3:-}
   echo "════════ Levyn tittelit ════════"
   printf '%s\n' "$titles" | sort -k2 -rn | while read -r t d; do
     printf '  Titteli %-3s %4d min%s\n' "$t" "$((d/60))" "$([ "$t" = "$mainsug" ] && echo '   ⟵ pisin (pääelokuva-ehdotus)')"
   done
+  [ -n "$label" ] && echo "  Levyn nimiö → nimiehdotus: $label"
   echo "════════════════════════════════"
   read -rp "Tyyppi [movie/series/doc/music/misc] (oletus movie): " kind; kind=${kind:-movie}
-  name=""; while [ -z "$name" ]; do read -rp "Nimi (pakollinen): " name; done
+  # Nimiehdotus levyn nimiöstä oletuksena — Enter hyväksyy, tai kirjoita oikea.
+  read -rp "Nimi${label:+ [$label]}: " name; name=${name:-$label}
+  while [ -z "$name" ]; do read -rp "Nimi (pakollinen): " name; done
   year=""; season=""; ep0=1; mainsel=""; eps=""; extras=""
   case $kind in
     movie|doc) read -rp "Vuosi (valinnainen): " year ;;
@@ -98,7 +110,7 @@ if [ -n "${DVDQ_RIPPAA_SCANFILE:-}" ]; then
   sf="$DVDQ_RIPPAA_SCANFILE"; src=$(jq -r '.source' "$sf")
   titles=$(jq -r '.titles[]|select(.status=="ok")|"\(.title) \(.duration_s // 0)"' "$sf")
   mainsug=$(jq -r '.main_suggestion // (.titles|map(select(.status=="ok"))|max_by(.duration_s).title)' "$sf")
-  ask_classification "$titles" "$mainsug"
+  ask_classification "$titles" "$mainsug" "$(jq -r '.volume // ""' "$sf")"
   enqueue_selected "$src"; exit 0
 fi
 
@@ -110,7 +122,7 @@ titles=$(_lsdvd_titles "$DEV")
 mainsug=$(printf '%s\n' "$titles" | sort -k2 -n | tail -1 | awk '{print $1}')
 
 # ══════════ 2. kysy tiedot (ENNEN pitkää rippausta) ══════════
-ask_classification "$titles" "$mainsug"
+ask_classification "$titles" "$mainsug" "$(_disc_label "$DEV")"
 
 # ══════════ 3. dvdbackup VALVOMATTA (nyt voit poistua) ══════════
 echo "──────────────────────────────"
