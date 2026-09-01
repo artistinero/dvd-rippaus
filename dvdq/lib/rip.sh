@@ -63,9 +63,10 @@ cmd_rip() {
   fi
   # --- rippaus ---
   local discdir; discdir=$(next_disc_dir)
-  rip_backup "$dev" "$discdir" || { err_out bad_state dvdbackup "$dev" "dvdbackup epäonnistui"; return 1; }
+  # Epäonnistunut rippaus siivoaa OMAN hakemistonsa → ei jää tyhjiä disc-NNN-haamunumeroita.
+  rip_backup "$dev" "$discdir" || { rm -rf "$discdir"; err_out bad_state dvdbackup "$dev" "dvdbackup epäonnistui"; return 1; }
   local vts; vts=$(find "$discdir" -type d -iname VIDEO_TS 2>/dev/null | head -1)
-  [ -n "$vts" ] || { err_out disc_broken device "$dev" "VIDEO_TS ei löytynyt rippauksen jälkeen"; return 1; }
+  [ -n "$vts" ] || { rm -rf "$discdir"; err_out disc_broken device "$dev" "VIDEO_TS ei löytynyt rippauksen jälkeen"; return 1; }
   local disc_key; disc_key=$(dirname "$vts")
   # --- lukuvirheet → levytason broken (§7 kohta 4) ---
   if [ "$RIP_READ_ERRORS" -gt "${CFG[READ_ERROR_MAX]}" ]; then
