@@ -15,11 +15,16 @@ source "$HERE/../lib/scan.sh"; source "$HERE/../lib/rip.sh"
 config_load
 DEV="${1:-/dev/sr1}"
 
-# _lsdvd_titles <device> → "titteli kesto_s" per rivi (nopea, ei kopioi). Tyhjä jos ei lue.
+# _lsdvd_titles <device> → "titteli kesto_s luvut" per rivi (nopea, ei kopioi). Luvut = chapters
+# (parhaan kyvyn mukaan; tyhjä jos ei jäsenny). Tyhjä jos ei lue.
 _lsdvd_titles() {
-  lsdvd "$1" 2>/dev/null \
-    | sed -n 's/^Title: 0*\([0-9]\+\), Length: \([0-9]\+\):\([0-9]\+\):\([0-9]\+\).*/\1 \2 \3 \4/p' \
-    | awk '{printf "%s %d\n", $1, $2*3600+$3*60+$4}'
+  lsdvd "$1" 2>/dev/null | sed -n 's/^Title: 0*\([0-9]\+\), Length: \([0-9]\+\):\([0-9]\+\):\([0-9]\+\).*/&/p' \
+    | while read -r line; do
+        t=$(printf '%s' "$line" | sed -n 's/^Title: 0*\([0-9]\+\),.*/\1/p')
+        hms=$(printf '%s' "$line" | sed -n 's/.*Length: \([0-9]\+\):\([0-9]\+\):\([0-9]\+\).*/\1 \2 \3/p')
+        ch=$(printf '%s' "$line" | sed -n 's/.*Chapters: 0*\([0-9]\+\).*/\1/p')
+        set -- $hms; printf '%s %d %s\n' "$t" $(( ${1:-0}*3600 + ${2:-0}*60 + ${3:-0} )) "${ch:-0}"
+      done
 }
 
 # _disc_label <device> → levyn nimiöstä (lsdvd "Disc Title:") NIMIEHDOTUS: alaviivat väleiksi,
@@ -36,10 +41,16 @@ _disc_label() {
 ask_classification() {
   local titles=$1 mainsug=$2 label=${3:-}
   echo "════════ Levyn tittelit ════════"
-  printf '%s\n' "$titles" | sort -k2 -rn | while read -r t d; do
-    printf '  Titteli %-3s %4d min%s\n' "$t" "$((d/60))" "$([ "$t" = "$mainsug" ] && echo '   ⟵ pisin (pääelokuva-ehdotus)')"
+  printf '%s\n' "$titles" | sort -k2 -rn | while read -r t d c; do
+    local mark
+    if [ "$t" = "$mainsug" ]; then mark="⟵ pisin (pääelokuva-ehdotus)"
+    elif [ "${d:-0}" -lt 60 ]; then mark="(lyhyt — todennäk. VALIKKO, jätetään pois)"
+    else mark="(sisältöä — todennäk. ekstra)"; fi
+    printf '  Titteli %-3s %4d min%s  %s\n' "$t" "$((d/60))" "$([ -n "$c" ] && [ "$c" != 0 ] && printf ', %s lukua' "$c")" "$mark"
   done
   [ -n "$label" ] && echo "  Levyn nimiö → nimiehdotus: $label"
+  echo "  (Kestosta ei voi varmasti tietää mikä titteli on. Oletus ottaa KAIKEN sisällön —"
+  echo "   turha ekstra on helppo poistaa, mutta puuttuva vaatii koko levyn uudelleen.)"
   echo "════════════════════════════════"
   read -rp "Tyyppi [movie/series/doc/music/misc] (oletus movie): " kind; kind=${kind:-movie}
   # Nimiehdotus levyn nimiöstä oletuksena — Enter hyväksyy, tai kirjoita oikea.
@@ -50,15 +61,22 @@ ask_classification() {
     movie|doc) read -rp "Vuosi (valinnainen): " year ;;
     series)    read -rp "Kausi (numero): " season; read -rp "Ensimmäisen jakson numero [1]: " ep0; ep0=${ep0:-1} ;;
   esac
-  local mind="${CFG[MIN_DURATION]}"
+  local mind="${CFG[MIN_DURATION]}"                 # jaksojen kynnys (pitkät)
+  local emin="${DVDQ_EXTRA_MIN_S:-60}"              # EKSTROJEN kynnys: 60 s (ohittaa 0-min valikot,
+  # ottaa oikeat lyhyet ekstrat kuten 2–4 min featuretit). Säädettävissä DVDQ_EXTRA_MIN_S:llä.
   if [ "$kind" = series ]; then
     read -rp "Jakso-tittelit järjestyksessä (välilyönnein, tyhjä = kaikki >= $((mind/60)) min): " eps
     [ -z "$eps" ] && eps=$(printf '%s\n' "$titles" | awk -v m="$mind" '$2>=m{print $1}' | sort -n | tr '\n' ' ')
-    read -rp "Ekstra-tittelit (välilyönnein, tyhjä = ei ekstroja): " extras
+    read -rp "Ekstra-tittelit (välilyönnein, 'auto' = kaikki muut >= ${emin} s, tyhjä = ei ekstroja): " extras
+    [ "$extras" = auto ] && extras=$(printf '%s\n' "$titles" | awk -v m="$emin" '$2>=m{print $1}' | sort -n | tr '\n' ' ')
   else
     read -rp "Pääelokuvan titteli [${mainsug}]: " mainsel; mainsel=${mainsel:-$mainsug}
-    read -rp "Ekstra-tittelit (välilyönnein, 'auto' = kaikki muut >= $((mind/60)) min, tyhjä = ei ekstroja): " extras
-    [ "$extras" = auto ] && extras=$(printf '%s\n' "$titles" | awk -v m="$mind" -v x="$mainsel" '$2>=m && $1!=x{print $1}' | sort -n | tr '\n' ' ')
+    # INKLUSIIVINEN OLETUS: Enter = kaikki sisältötittelit (>= ${emin}s, valikot pois). 'ei' = ei ekstroja.
+    read -rp "Ekstra-tittelit — Enter = KAIKKI sisältö (suositus), 'ei' = ei mitään, tai numerot: " extras
+    case "${extras}" in
+      ""|auto) extras=$(printf '%s\n' "$titles" | awk -v m="$emin" -v x="$mainsel" '$2>=m && $1!=x{print $1}' | sort -n | tr '\n' ' ') ;;
+      ei|EI|none|0) extras="" ;;
+    esac
   fi
   echo "──────── Yhteenveto ────────"
   echo "  Tyyppi: $kind   Nimi: $name   ${year:+Vuosi: $year }${season:+Kausi: $season (jaksot alkaen $ep0)}"
