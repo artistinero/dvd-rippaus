@@ -101,7 +101,8 @@ _hb_build() {
   deint=$(printf '%s' "$j" | jq -r '.deinterlace // "auto"')
   wa=$(printf '%s' "$j" | jq -r '(.want_audio // []) | join(",")')
   ws=$(printf '%s' "$j" | jq -r '(.want_subs  // []) | join(",")')
-  _out=( -i "$src" --title "$title" -o "$tmp" -f av_mkv -e "$enc" -q "$crf" )
+  # --markers (DVD-luvut) + --loose-anamorphic (kuvasuhde) = vanhan rip-dvd.sh:n tunnettu-hyvä (puutteet #5, #6).
+  _out=( -i "$src" --title "$title" -o "$tmp" -f av_mkv -e "$enc" -q "$crf" --markers --loose-anamorphic )
   # SUOJAVERKKO: ääntä EI saa pudottaa hiljaa eikä enkoodata turhaan uusiksi (vanhan rip-dvd.sh:n
   # tunnettu-hyvä: --all-audio --aencoder copy --audio-fallback aac). Vanha dvdq:n `-a 1`-vara otti
   # VAIN 1. raidan kun want_audio tyhjä (skannaus petti) → ääniraitoja katosi; ilman --aencoder copy
