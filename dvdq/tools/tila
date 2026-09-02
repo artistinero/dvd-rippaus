@@ -31,6 +31,26 @@ read -r pending done_ failed broken uskip aband < <(printf '%s' "$j"|jq -r '[.pe
 printf 'Jono: %s odottaa | %s valmis | %s failed | %s broken | %s user_skip | %s abandoned\n' \
   "$pending" "$done_" "$failed" "$broken" "$uskip" "$aband"
 
+# Ongelmat eriteltyinä: MIKÄ epäonnistui ja MIKSI (review-problematic, ihmisluettava syy).
+if [ "$((failed + broken))" -gt 0 ]; then
+  echo "Ongelmat (failed/broken):"
+  "$DVDQ" review-problematic 2>/dev/null \
+    | jq -r '.problematic[]? | "\(.name // .id)\t\(.status)\t\(.fail_reason // "?")\t\(.read_errors // 0)"' \
+    | while IFS=$'\t' read -r nm st rs re; do
+        case "$rs" in
+          verify)      g="verifiointi hylkäsi (ääni-/tekstitysraita tai kesto puuttui/korruptoitui)" ;;
+          sync_tmp)    g="tmp-tiedoston levylle-synkkaus epäonnistui (NAS/levy-häiriö) — usein retry-kelpoinen" ;;
+          mv)          g="valmiin tiedoston siirto NAS:iin epäonnistui" ;;
+          backup)      g="rippaus/lähde epäonnistui" ;;
+          rc=*)        g="enkooderi palautti virheen ($rs)" ;;
+          READ_ERROR*) g="liikaa lukuvirheitä (viallinen levy)" ;;
+          *)           g="$rs" ;;
+        esac
+        [ "${re:-0}" != 0 ] && [ "${re:-0}" != null ] && g="$g, lukuvirheitä $re"
+        printf '  ✗ %s  [%s]  — %s\n' "$nm" "$st" "$g"
+      done
+fi
+
 sp=$(printf '%s' "$j"|jq -r '.speed_factor // empty')
 eta=$(printf '%s' "$j"|jq -r '.queue_eta_s // empty')
 if [ -n "$sp" ]; then
@@ -42,4 +62,9 @@ printf 'Velka: %s GB enkoodattavaa | karanteeni %s GB | kuitattu %s GB\n' \
   "$(printf '%s' "$j"|jq -r '.encode_debt_gb // 0')" \
   "$(printf '%s' "$j"|jq -r '.quarantine_gb // 0')" \
   "$(printf '%s' "$j"|jq -r '.abandoned_gb // 0')"
+
+# Levytila: kohde-NAS (Jellyfin-kirjasto) + paikallinen työhakemisto (rippaukset ennen enkoodausta).
+read -r dfree dpct wfree < <(printf '%s' "$j"|jq -r '[.disk.dest_free_gb // "?", .disk.dest_used_pct // "?", .disk.work_free_gb // "?"]|@tsv')
+printf 'Levytila: kohde-NAS %s GB vapaana (%s%% käytössä) | työhakemisto %s GB vapaana\n' \
+  "$dfree" "$dpct" "$wfree"
 echo "══════════════════════════════════════════"

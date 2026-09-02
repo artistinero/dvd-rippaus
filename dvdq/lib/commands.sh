@@ -270,8 +270,21 @@ _status_json() {
       --argjson eta "${eta_s:-null}" --argjson sp "${speed:-null}" \
       '{encode_debt_gb:$ed,quarantine_gb:$qg,abandoned_gb:$ag,queue_eta_s:$eta,speed_factor:$sp}')
   fi
+  # Levytila (kohde-NAS + paikallinen työhakemisto). df on halpa mutta voi jäätyä NAS-katkossa →
+  # vain ei-fast-kutsulla (ihminen/GUI), ei dispatcherin tiheässä write_statusissa. Tyhjä {} jos fast/virhe.
+  local disk='{}'
+  if [ "$fast" != 1 ]; then
+    local dline wline dfree dpct wfree
+    dline=$(df -PB1 "${CFG[DEST_ROOT]}" 2>/dev/null | awk 'NR==2{print $4, $5}')
+    wline=$(df -PB1 "${CFG[WORK_DIR]}"  2>/dev/null | awk 'NR==2{print $4}')
+    dfree=$(printf '%s' "$dline" | awk '{print $1}'); dpct=$(printf '%s' "$dline" | awk '{gsub(/%/,"",$2); print $2}')
+    wfree=$(printf '%s' "$wline" | awk '{print $1}')
+    disk=$(jq -cn --argjson df "$(( ${dfree:-0} / 1073741824 ))" --argjson dp "${dpct:-0}" \
+                  --argjson wf "$(( ${wfree:-0} / 1073741824 ))" \
+      '{dest_free_gb:$df, dest_used_pct:$dp, work_free_gb:$wf}')
+  fi
   jq -cn --argjson c "$counters" --argjson enc "$enc" --argjson paused "$paused" \
         --argjson alive "$alive" --arg updated "$updated" --argjson parallel "${CFG[PARALLEL]}" \
-        --argjson m "$meters" \
-    '$c + $m + {updated:$updated,parallel:$parallel,dispatcher_alive:$alive,paused:$paused,encoding:$enc}'
+        --argjson m "$meters" --argjson disk "$disk" \
+    '$c + $m + {updated:$updated,parallel:$parallel,dispatcher_alive:$alive,paused:$paused,encoding:$enc,disk:$disk}'
 }
